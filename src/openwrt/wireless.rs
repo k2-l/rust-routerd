@@ -1,3 +1,4 @@
+use std::fs;
 use serde_json::{json, Value};
 
 use crate::openwrt::ubus;
@@ -28,14 +29,49 @@ fn iwinfo_assoc(dev: &str) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-/// Live view of all wireless netdevs plus their associated stations.
+fn infer_live_band(info: &Value) -> &'static str {
+    if let Some(freq) = info.get("frequency").and_then(|v| v.as_u64()) {
+        if freq >= 5925 {
+            return "6g";
+        } else if freq >= 4900 {
+            return "5g";
+        } else if freq >= 2400 {
+            return "2g";
+        }
+    }
+    if let Some(ch) = info.get("channel").and_then(|v| v.as_u64()) {
+        if ch > 14 {
+            return "5g";
+        } else if ch >= 1 {
+            return "2g";
+        }
+    }
+    ""
+}
+
+/// Check if ARP entry is genuinely reachable (flags != 0x0) via /proc/net/arp
+fn is_arp_reachable(ip: &str) -> bool {
+    let Ok(content) = fs::read_to_string("/proc/net/arp") else {
+        return true;
+    };
+    for line in content.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 3 && cols[0] == ip {
+            return cols[2] != "0x0";
+        }
+    }
+    false
+}
+
 pub fn live() -> Vec<Value> {
     let mut out = Vec::new();
     for dev in iwinfo_devices() {
         let info = iwinfo_info(&dev).unwrap_or(Value::Null);
         let assoc = iwinfo_assoc(&dev);
+        let band = infer_live_band(&info);
         out.push(json!({
             "device": dev,
+            "band": band,
             "ssid": info.get("ssid").cloned().unwrap_or(Value::Null),
             "bssid": info.get("bssid").cloned().unwrap_or(Value::Null),
             "mode": info.get("mode").cloned().unwrap_or(Value::Null),
@@ -55,31 +91,44 @@ pub fn live() -> Vec<Value> {
     out
 }
 
-/// Config + live state joined by SSID, which is what the UI edits.
 pub fn overview() -> Value {
     let cfg = crate::openwrt::uci::load("wireless").unwrap_or_default();
+    let live_list = live();
     let mut radios = Vec::new();
+
     for r in cfg.by_kind("wifi-device") {
         let disabled = r.bool("disabled");
+        let radio_band = r.get_or("band", "").to_ascii_lowercase();
         let ifaces: Vec<&crate::openwrt::uci::Section> = cfg
             .by_kind("wifi-iface")
             .filter(|i| i.get("device") == Some(r.name.as_str()))
             .collect();
-        let live = live();
+
         let mut live_ifaces = Vec::new();
         for i in &ifaces {
             let ssid = i.get_or("ssid", "");
-            let match_live = live.iter().find(|l| {
-                l["ssid"].as_str().unwrap_or("") == ssid
-                    && l["mode"].as_str().unwrap_or("") != "Client"
-            });
+            let key = i.get_or("key", "");
+            let match_live = live_list
+                .iter()
+                .find(|l| {
+                    l["ssid"].as_str().unwrap_or("") == ssid
+                        && l["mode"].as_str().unwrap_or("") != "Client"
+                        && (!radio_band.is_empty() && l["band"].as_str().unwrap_or("") == radio_band)
+                })
+                .or_else(|| {
+                    live_list.iter().find(|l| {
+                        l["ssid"].as_str().unwrap_or("") == ssid
+                            && l["mode"].as_str().unwrap_or("") != "Client"
+                    })
+                });
+
             live_ifaces.push(json!({
                 "section": i.name,
                 "ssid": ssid,
                 "mode": i.get_or("mode", "ap"),
                 "network": i.get_or("network", "lan"),
                 "encryption": i.get_or("encryption", "none"),
-                "key": i.get_or("key", ""),
+                "has_key": !key.is_empty(),
                 "hidden": i.bool("hidden"),
                 "disabled": i.bool("disabled"),
                 "isolate": i.bool("isolate"),
@@ -89,6 +138,7 @@ pub fn overview() -> Value {
                 "txpower": match_live.and_then(|l| l.get("txpower")).cloned().unwrap_or(Value::Null),
             }));
         }
+
         radios.push(json!({
             "name": r.name,
             "band": r.get_or("band", ""),
@@ -102,14 +152,14 @@ pub fn overview() -> Value {
             "ifaces": live_ifaces,
         }));
     }
-    json!({"radios": radios, "live": live()})
+    json!({"radios": radios, "live": live_list})
 }
 
-/// All associated stations, joined with DHCP leases for names/IPs.
 pub fn clients() -> Vec<Value> {
     let leases = crate::openwrt::net::leases();
     let arp = crate::openwrt::net::arp_table();
     let mut out = Vec::new();
+
     for dev in live() {
         let iface = dev["device"].as_str().unwrap_or("");
         let ssid = dev["ssid"].as_str().unwrap_or("");
@@ -121,9 +171,17 @@ pub fn clients() -> Vec<Value> {
                 .get("mac")
                 .and_then(|m| m.as_str())
                 .unwrap_or("")
-                .to_uppercase();
-            let lease = leases.iter().find(|l| l["mac"] == json!(mac));
-            let arp_entry = arp.iter().find(|a| a["mac"] == json!(mac));
+                .to_ascii_uppercase();
+            if mac.is_empty() {
+                continue;
+            }
+            let lease = leases
+                .iter()
+                .find(|l| l["mac"].as_str().unwrap_or("").eq_ignore_ascii_case(&mac));
+            let arp_entry = arp
+                .iter()
+                .find(|a| a["mac"].as_str().unwrap_or("").eq_ignore_ascii_case(&mac));
+
             out.push(json!({
                 "mac": mac,
                 "signal": s.get("signal").cloned().unwrap_or(Value::Null),
@@ -139,23 +197,35 @@ pub fn clients() -> Vec<Value> {
             }));
         }
     }
-    // Wired clients known to DHCP/ARP but not associated to Wi-Fi.
+
     for a in &arp {
-        let mac = a["mac"].as_str().unwrap_or("");
-        if out.iter().any(|c| c["mac"] == json!(mac)) {
+        let mac = a["mac"].as_str().unwrap_or("").to_ascii_uppercase();
+        let ip = a["ip"].as_str().unwrap_or("");
+        if mac.is_empty() || ip.is_empty() {
+            continue;
+        }
+        if out.iter().any(|c| c["mac"].as_str().unwrap_or("").eq_ignore_ascii_case(&mac)) {
             continue;
         }
         let dev = a["device"].as_str().unwrap_or("");
         if !(dev.starts_with("br-") || dev.starts_with("eth") || dev.starts_with("lan")) {
             continue;
         }
-        let lease = leases.iter().find(|l| l["mac"] == json!(mac));
+        // Filter out stale/unplugged ARP entries (flags == 0x0)
+        if !is_arp_reachable(ip) {
+            continue;
+        }
+        let lease = leases
+            .iter()
+            .find(|l| l["mac"].as_str().unwrap_or("").eq_ignore_ascii_case(&mac));
         out.push(json!({
             "mac": mac,
-            "ip": a["ip"].clone(),
+            "ip": ip,
             "hostname": lease.and_then(|l| l["hostname"].as_str()).unwrap_or(""),
             "iface": dev,
             "signal": Value::Null,
+            "rx": json!({"bytes": 0}),
+            "tx": json!({"bytes": 0}),
             "wireless": false,
             "inactive": Value::Null,
         }));
@@ -163,10 +233,10 @@ pub fn clients() -> Vec<Value> {
     out
 }
 
-/// Apply Wi-Fi interface + radio settings.
 pub fn apply(payload: &Value) -> anyhow::Result<()> {
     use crate::openwrt::uci;
 
+    let cfg = uci::load("wireless").unwrap_or_default();
     let Some(radios) = payload.get("radios").and_then(|v| v.as_array()) else {
         anyhow::bail!("missing radios");
     };
@@ -178,21 +248,43 @@ pub fn apply(payload: &Value) -> anyhow::Result<()> {
         if !util::valid_name(name) {
             anyhow::bail!("invalid radio name");
         }
+        let band = cfg
+            .section(name)
+            .and_then(|s| s.get("band"))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
         if let Some(v) = r.get("channel").and_then(|v| v.as_str()) {
-            if v != "auto" && v.parse::<u16>().is_err() {
-                anyhow::bail!("信道必须是 auto 或数字");
+            if v != "auto" {
+                let ch: u16 = v.parse().map_err(|_| anyhow::anyhow!("信道必须是 auto 或数字"))?;
+                if band == "2g" && !(1..=14).contains(&ch) {
+                    anyhow::bail!("2.4GHz 频段信道必须在 1-14 之间");
+                }
+                if band == "5g" && ch < 36 {
+                    anyhow::bail!("5GHz 频段信道必须大于等于 36");
+                }
             }
             changes.push((name.into(), "channel".into(), Some(v.to_string())));
         }
         if let Some(v) = r.get("htmode").and_then(|v| v.as_str()) {
             if !v.is_empty() {
+                let valid_modes = ["HT20", "HT40", "VHT20", "VHT40", "VHT80", "VHT160", "HE20", "HE40", "HE80", "HE160", "EHT20", "EHT40", "EHT80", "EHT160", "EHT320"];
+                if !valid_modes.contains(&v) {
+                    anyhow::bail!("不支持的频宽模式: {v}");
+                }
+                if band == "2g" && (v.contains("80") || v.contains("160") || v.contains("320")) {
+                    anyhow::bail!("2.4GHz 频段不支持 {v} 频宽");
+                }
                 changes.push((name.into(), "htmode".into(), Some(v.to_string())));
             }
         }
         if let Some(v) = r.get("txpower").and_then(|v| v.as_str()) {
             if !v.is_empty() {
-                if v != "auto" && v.parse::<i16>().is_err() {
-                    anyhow::bail!("发射功率无效");
+                if v != "auto" {
+                    let pwr: i16 = v.parse().map_err(|_| anyhow::anyhow!("发射功率无效"))?;
+                    if !(0..=30).contains(&pwr) {
+                        anyhow::bail!("发射功率必须在 0-30 dBm 之间");
+                    }
                 }
                 changes.push((name.into(), "txpower".into(), Some(v.to_string())));
             }
@@ -241,8 +333,6 @@ pub fn apply(payload: &Value) -> anyhow::Result<()> {
         }
     }
     uci::apply("wireless", &changes)?;
-    // Reload is scheduled by the API layer after the response is sent, so a
-    // client connected over Wi-Fi still receives the save confirmation.
     Ok(())
 }
 

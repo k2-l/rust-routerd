@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
@@ -8,8 +9,10 @@ use crate::util;
 
 const TABLE_SEC: &str = "routerd_auth_table";
 const RULE_SEC: &str = "routerd_auth_rule";
+const INPUT_SEC: &str = "routerd_auth_input";
 const TABLE_FILE: &str = "auth-table.nft";
 const RULE_FILE: &str = "auth-forward.nft";
+const INPUT_FILE: &str = "auth-input.nft";
 
 fn lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
@@ -22,6 +25,12 @@ pub fn available() -> bool {
 
 fn nft_bin() -> Option<&'static str> {
     ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+}
+
+fn conntrack_bin() -> Option<&'static str> {
+    ["/usr/sbin/conntrack", "/sbin/conntrack", "/usr/bin/conntrack"]
         .into_iter()
         .find(|path| std::path::Path::new(path).exists())
 }
@@ -60,41 +69,42 @@ pub fn write_files(store: &DeviceStore, data_dir: &str) -> Result<()> {
     }
     table.push_str("}\n");
 
-    let rule = format!(
-        "iifname \"{iface}\" ether saddr != @routerd_authorized drop comment \"routerd: unauthorized device\"\n"
+    let fwd_rule = format!(
+        "iifname \"{iface}\" ether saddr != @routerd_authorized drop comment \"routerd: unauthorized forward\"\n"
+    );
+
+    // Block unauthorized LAN clients from probing SSH (22) or local router ports while permitting DHCP & DNS
+    let input_rule = format!(
+        "iifname \"{iface}\" ether saddr != @routerd_authorized udp dport {{ 53, 67 }} accept comment \"routerd: allow unauth dhcp/dns\"\n\
+         iifname \"{iface}\" ether saddr != @routerd_authorized tcp dport {{ 22, 53 }} reject comment \"routerd: block unauth ssh\"\n"
     );
 
     util::write_atomic(&format!("{data_dir}/{TABLE_FILE}"), table.as_bytes(), 0o644)?;
-    util::write_atomic(&format!("{data_dir}/{RULE_FILE}"), rule.as_bytes(), 0o644)?;
+    util::write_atomic(&format!("{data_dir}/{RULE_FILE}"), fwd_rule.as_bytes(), 0o644)?;
+    util::write_atomic(&format!("{data_dir}/{INPUT_FILE}"), input_rule.as_bytes(), 0o644)?;
     Ok(())
 }
 
-fn include_state(data_dir: &str) -> (bool, bool) {
+fn include_state(data_dir: &str) -> (bool, bool, bool) {
     let cfg = uci::load("firewall").unwrap_or_default();
-    let table_path = format!("{data_dir}/{TABLE_FILE}");
-    let rule_path = format!("{data_dir}/{RULE_FILE}");
-    let table_ok = cfg
-        .section(TABLE_SEC)
-        .map(|s| {
-            s.kind == "include"
-                && s.get("type") == Some("nftables")
-                && s.get("path") == Some(table_path.as_str())
-                && s.get("position") == Some("table-prepend")
-                && !matches!(s.get("enabled"), Some("0"))
-        })
-        .unwrap_or(false);
-    let rule_ok = cfg
-        .section(RULE_SEC)
-        .map(|s| {
-            s.kind == "include"
-                && s.get("type") == Some("nftables")
-                && s.get("path") == Some(rule_path.as_str())
-                && s.get("position") == Some("chain-prepend")
-                && s.get("chain") == Some("forward")
-                && !matches!(s.get("enabled"), Some("0"))
-        })
-        .unwrap_or(false);
-    (table_ok, rule_ok)
+    let check = |sec: &str, file: &str, pos: &str, chain: Option<&str>| -> bool {
+        let path = format!("{data_dir}/{file}");
+        cfg.section(sec)
+            .map(|s| {
+                s.kind == "include"
+                    && s.get("type") == Some("nftables")
+                    && s.get("path") == Some(path.as_str())
+                    && s.get("position") == Some(pos)
+                    && s.get("chain") == chain
+                    && !matches!(s.get("enabled"), Some("0"))
+            })
+            .unwrap_or(false)
+    };
+    (
+        check(TABLE_SEC, TABLE_FILE, "table-prepend", None),
+        check(RULE_SEC, RULE_FILE, "chain-prepend", Some("forward")),
+        check(INPUT_SEC, INPUT_FILE, "chain-prepend", Some("input")),
+    )
 }
 
 fn ensure_include(
@@ -114,10 +124,7 @@ fn ensure_include(
     util::run(bin, &["set", &format!("firewall.{sec}=include")])?;
     let base = format!("firewall.{sec}");
     util::run(bin, &["set", &format!("{base}.type=nftables")])?;
-    util::run(
-        bin,
-        &["set", &format!("{base}.path={data_dir}/{file}")],
-    )?;
+    util::run(bin, &["set", &format!("{base}.path={data_dir}/{file}")])?;
     util::run(bin, &["set", &format!("{base}.position={position}")])?;
     util::run(bin, &["set", &format!("{base}.enabled=1")])?;
     if let Some(chain) = chain {
@@ -127,8 +134,8 @@ fn ensure_include(
 }
 
 fn ensure_includes(data_dir: &str) -> Result<bool> {
-    let (table_ok, rule_ok) = include_state(data_dir);
-    if table_ok && rule_ok {
+    let (table_ok, rule_ok, input_ok) = include_state(data_dir);
+    if table_ok && rule_ok && input_ok {
         return Ok(false);
     }
     if !table_ok {
@@ -137,20 +144,23 @@ fn ensure_includes(data_dir: &str) -> Result<bool> {
     if !rule_ok {
         ensure_include(RULE_SEC, data_dir, RULE_FILE, "chain-prepend", Some("forward"))?;
     }
+    if !input_ok {
+        ensure_include(INPUT_SEC, data_dir, INPUT_FILE, "chain-prepend", Some("input"))?;
+    }
     util::run(uci::bin(), &["commit", "firewall"])?;
     Ok(true)
 }
 
 fn remove_includes() -> Result<bool> {
     let cfg = uci::load("firewall").unwrap_or_default();
-    if cfg.section(TABLE_SEC).is_none() && cfg.section(RULE_SEC).is_none() {
+    if cfg.section(TABLE_SEC).is_none()
+        && cfg.section(RULE_SEC).is_none()
+        && cfg.section(INPUT_SEC).is_none()
+    {
         return Ok(false);
     }
-    for sec in [TABLE_SEC, RULE_SEC] {
-        let _ = util::run_ok(
-            uci::bin(),
-            &["-q", "delete", &format!("firewall.{sec}")],
-        );
+    for sec in [TABLE_SEC, RULE_SEC, INPUT_SEC] {
+        let _ = util::run_ok(uci::bin(), &["-q", "delete", &format!("firewall.{sec}")]);
     }
     util::run(uci::bin(), &["commit", "firewall"])?;
     Ok(true)
@@ -159,6 +169,43 @@ fn remove_includes() -> Result<bool> {
 fn reload_fw4() -> Result<()> {
     util::run("/etc/init.d/firewall", &["reload"])?;
     Ok(())
+}
+
+fn flush_unauthorized_conntrack(store: &DeviceStore) {
+    let Some(ct) = conntrack_bin() else {
+        return;
+    };
+    let allowed: HashSet<String> = store
+        .allowed_macs()
+        .into_iter()
+        .map(|m| m.to_ascii_lowercase())
+        .collect();
+
+    let mut target_ips: HashSet<String> = HashSet::new();
+    for a in crate::openwrt::net::arp_table() {
+        let mac = a["mac"].as_str().unwrap_or("").to_ascii_lowercase();
+        let ip = a["ip"].as_str().unwrap_or("");
+        let dev = a["device"].as_str().unwrap_or("");
+        if !mac.is_empty()
+            && !ip.is_empty()
+            && (dev.starts_with("br-") || dev.starts_with("lan") || dev.starts_with("eth"))
+            && !allowed.contains(&mac)
+        {
+            target_ips.insert(ip.to_string());
+        }
+    }
+    for l in crate::openwrt::net::leases() {
+        let mac = l["mac"].as_str().unwrap_or("").to_ascii_lowercase();
+        let ip = l["ip"].as_str().unwrap_or("");
+        if !mac.is_empty() && !ip.is_empty() && !allowed.contains(&mac) {
+            target_ips.insert(ip.to_string());
+        }
+    }
+
+    for ip in target_ips {
+        let _ = util::run_ok(ct, &["-D", "-s", &ip]);
+        let _ = util::run_ok(ct, &["-D", "-d", &ip]);
+    }
 }
 
 fn nft_sync(store: &DeviceStore) -> Result<()> {
@@ -176,6 +223,7 @@ fn nft_sync(store: &DeviceStore) -> Result<()> {
         script.push_str(" }\n");
     }
     util::run_input(bin, &["-f", "-"], &script)?;
+    flush_unauthorized_conntrack(store);
     Ok(())
 }
 
@@ -186,6 +234,7 @@ fn sync_locked(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     write_files(store, data_dir)?;
     if ensure_includes(data_dir)? {
         reload_fw4()?;
+        flush_unauthorized_conntrack(store);
         return Ok(());
     }
     match nft_sync(store) {
@@ -198,13 +247,11 @@ fn sync_locked(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     }
 }
 
-/// Fast path used on authorize/revoke/expiry while enforcement is active.
 pub fn sync(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     let _guard = lock().lock().unwrap();
     sync_locked(store, data_dir, sim)
 }
 
-/// Enable enforcement: persist rules, install fw4 includes and reload once.
 pub fn enable(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     if sim {
         return Ok(());
@@ -213,10 +260,10 @@ pub fn enable(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     write_files(store, data_dir)?;
     ensure_includes(data_dir)?;
     reload_fw4()?;
+    flush_unauthorized_conntrack(store);
     Ok(())
 }
 
-/// Disable enforcement: remove includes and reload fw4.
 pub fn disable(_data_dir: &str, sim: bool) -> Result<()> {
     if sim {
         return Ok(());
@@ -228,7 +275,6 @@ pub fn disable(_data_dir: &str, sim: bool) -> Result<()> {
     Ok(())
 }
 
-/// Startup reconciliation.
 pub fn bootstrap(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     if sim {
         return Ok(());
@@ -247,6 +293,7 @@ pub fn bootstrap(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     let changed = ensure_includes(data_dir)?;
     if changed {
         reload_fw4()?;
+        flush_unauthorized_conntrack(store);
         return Ok(());
     }
     match nft_sync(store) {

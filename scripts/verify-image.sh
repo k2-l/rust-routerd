@@ -46,7 +46,7 @@ check "no LuCI www tree" "[ ! -d '$R/www/luci-static' ]"
 
 echo
 echo "== required runtime packages =="
-for p in rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear; do
+for p in rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
 	check "package $p" "grep -q '^Package: $p\$' '$R/usr/lib/opkg/status'"
 done
 

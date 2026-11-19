@@ -1,8 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use axum::extract::{Query, State};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
+use crate::state::AppState;
 
 use super::{ok, ApiError, ApiResult};
 use crate::openwrt::{net, uci};
@@ -255,6 +258,60 @@ pub async fn reload() -> ApiResult<Json<Value>> {
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(ok(json!({"reloaded": true})))
+}
+
+
+pub async fn hardware(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Ok(ok(json!({
+            "ports": [
+                { "name": "eth1", "label": "WAN 口 (2.5G)", "role": "WAN", "link_up": true, "speed_mbps": 2500, "duplex": "full", "rx_bytes": 1849201408u64, "tx_bytes": 342190208u64 },
+                { "name": "eth0", "label": "LAN 口 (1G)", "role": "LAN", "link_up": true, "speed_mbps": 1000, "duplex": "full", "rx_bytes": 329104896u64, "tx_bytes": 1820418048u64 }
+            ],
+            "hw_offload": true,
+            "sw_offload": true,
+        })));
+    }
+    let (ports, (hw_offload, sw_offload)) = tokio::task::spawn_blocking(|| {
+        (net::get_physical_ports(), net::check_offload_status())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(ok(json!({
+        "ports": ports,
+        "hw_offload": hw_offload,
+        "sw_offload": sw_offload,
+    })))
+}
+
+pub async fn redial() -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(net::redial_wan)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(ok(json!({ "restarted": true })))
+}
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    pub lines: Option<usize>,
+}
+
+pub async fn pppoe_log(
+    State(state): State<AppState>,
+    Query(q): Query<LogQuery>,
+) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Ok(ok(json!({
+            "log": "[sim] daemon.info pppd[1024]: Plugin pppoe.so loaded.\n[sim] daemon.info pppd[1024]: PPP session is 0x1a4f\n[sim] daemon.info pppd[1024]: PAP authentication succeeded\n[sim] daemon.notice netifd: Interface 'wan' is now up"
+        })));
+    }
+    let lines = q.lines.unwrap_or(40).min(200);
+    let log = tokio::task::spawn_blocking(move || net::get_pppoe_logs(lines))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(ok(json!({ "log": log })))
 }
 
 #[cfg(test)]

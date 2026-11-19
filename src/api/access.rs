@@ -27,7 +27,7 @@ async fn sync(state: &AppState, snapshot: DeviceStore) -> ApiResult<()> {
 }
 
 pub async fn get(State(state): State<AppState>) -> Json<Value> {
-    let store = state.access.read().unwrap();
+    let store = state.access.read().unwrap_or_else(|e| e.into_inner());
     ok(json!({
         "enforcement": store.enforcement,
         "counts": store.summary(),
@@ -56,7 +56,7 @@ pub async fn enforcement(
     Json(body): Json<EnforcementBody>,
 ) -> ApiResult<Json<Value>> {
     let (previous, changed, snapshot, counts) = {
-        let mut store = state.access.write().unwrap();
+        let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
         let _ = store.scan();
         let previous = store.enforcement;
         store.set_enforcement(body.enabled, body.authorize_current);
@@ -91,7 +91,7 @@ pub async fn enforcement(
             let sim = state.sim;
             let _ = tokio::task::spawn_blocking(move || nft::disable(&data_dir, sim)).await;
         }
-        let mut store = state.access.write().unwrap();
+        let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
         store.enforcement = previous;
         let _ = store.save(&format!("{}/access.json", state.data_dir));
         agents::audit(
@@ -138,7 +138,7 @@ async fn mutate(
 ) -> ApiResult<Json<Value>> {
     let mac = normalize_mac(mac).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
     let (device, snapshot) = {
-        let mut store = state.access.write().unwrap();
+        let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
         let device = match action {
             "authorize" => {
                 let body = body.unwrap_or_default();
@@ -211,7 +211,7 @@ pub async fn unblock(
 // ---------------- AI token management ----------------
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Value> {
-    let store = state.agents.read().unwrap();
+    let store = state.agents.read().unwrap_or_else(|e| e.into_inner());
     ok(json!({
         "tokens": store.views(),
         "scopes": [agents::SCOPE_READ, agents::SCOPE_WRITE],
@@ -231,7 +231,7 @@ pub async fn create_agent(
     Json(body): Json<CreateAgentBody>,
 ) -> ApiResult<Json<Value>> {
     let (token, entry) = {
-        let mut store = state.agents.write().unwrap();
+        let mut store = state.agents.write().unwrap_or_else(|e| e.into_inner());
         let (token, entry) = store.create(&body.name, &body.scopes);
         store
             .save(&format!("{}/agents.json", state.data_dir))
@@ -258,7 +258,7 @@ pub async fn delete_agent(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let removed = {
-        let mut store = state.agents.write().unwrap();
+        let mut store = state.agents.write().unwrap_or_else(|e| e.into_inner());
         let removed = store.revoke(&id);
         store
             .save(&format!("{}/agents.json", state.data_dir))

@@ -1,3 +1,6 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::process::Command;
 use serde_json::{json, Value};
 
 use crate::openwrt::ubus;
@@ -246,4 +249,124 @@ pub fn dns_servers() -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PhysicalPort {
+    pub name: String,
+    pub label: String,
+    pub role: String,
+    pub link_up: bool,
+    pub speed_mbps: i32,
+    pub duplex: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+pub fn get_physical_ports() -> Vec<PhysicalPort> {
+    let wan_dev = read_uci_option("network", "wan", "device")
+        .or_else(|| read_uci_option("network", "wan", "ifname"))
+        .unwrap_or_else(|| "eth1".into());
+
+    let candidates = ["eth1", "eth0", "wan", "lan1", "lan2", "lan3", "lan4"];
+    let mut ports = Vec::new();
+
+    for dev in candidates {
+        let sys_path = format!("/sys/class/net/{}", dev);
+        if !std::path::Path::new(&sys_path).exists() {
+            continue;
+        }
+        let carrier = fs::read_to_string(format!("{}/carrier", sys_path))
+            .unwrap_or_default()
+            .trim()
+            == "1";
+        let speed_mbps = fs::read_to_string(format!("{}/speed", sys_path))
+            .unwrap_or_else(|_| "-1".into())
+            .trim()
+            .parse::<i32>()
+            .unwrap_or(-1);
+        let duplex = fs::read_to_string(format!("{}/duplex", sys_path))
+            .unwrap_or_else(|_| "unknown".into())
+            .trim()
+            .to_string();
+        let rx_bytes = fs::read_to_string(format!("{}/statistics/rx_bytes", sys_path))
+            .unwrap_or_default()
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        let tx_bytes = fs::read_to_string(format!("{}/statistics/tx_bytes", sys_path))
+            .unwrap_or_default()
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+
+        let is_wan = dev == wan_dev || dev == "wan" || dev == "eth1";
+        let label = if is_wan {
+            "WAN 口".to_string()
+        } else if dev == "eth0" {
+            "LAN 口".to_string()
+        } else {
+            dev.to_uppercase()
+        };
+
+        ports.push(PhysicalPort {
+            name: dev.to_string(),
+            label,
+            role: if is_wan { "WAN".into() } else { "LAN".into() },
+            link_up: carrier,
+            speed_mbps: if carrier { speed_mbps } else { 0 },
+            duplex,
+            rx_bytes,
+            tx_bytes,
+        });
+    }
+    ports
+}
+
+pub fn check_offload_status() -> (bool, bool) {
+    let fw = fs::read_to_string("/etc/config/firewall").unwrap_or_default();
+    let sw = fw.contains("option flow_offloading '1'") || fw.contains("option flow_offloading \"1\"");
+    let hw = fw.contains("option flow_offloading_hw '1'") || fw.contains("option flow_offloading_hw \"1\"");
+    (hw, sw)
+}
+
+pub fn get_pppoe_logs(lines: usize) -> String {
+    let out = Command::new("logread")
+        .args(["-e", "pppd\\|pppoe\\|netifd"])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let all: Vec<&str> = text.lines().collect();
+            let start = all.len().saturating_sub(lines);
+            all[start..].join("\n")
+        }
+        Err(_) => "无法读取系统拨号日志".into(),
+    }
+}
+
+pub fn redial_wan() -> anyhow::Result<()> {
+    let _ = Command::new("ubus")
+        .args(["call", "network.interface.wan", "down"])
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let status = Command::new("ubus")
+        .args(["call", "network.interface.wan", "up"])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("ubus up 调用失败");
+    }
+    Ok(())
+}
+
+fn read_uci_option(pkg: &str, section: &str, opt: &str) -> Option<String> {
+    let out = Command::new("uci")
+        .args(["-q", "get", &format!("{}.{}.{}", pkg, section, opt)])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
 }

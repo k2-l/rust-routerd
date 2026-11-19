@@ -110,7 +110,7 @@ fn clear_cookies(state: &AppState) -> [header::HeaderValue; 2] {
 
 pub async fn logout(State(state): State<AppState>, req: axum::extract::Request) -> ApiResult<Response> {
     if let Some(token) = super::cookie_value(&req, "routerd_sid") {
-        state.sessions.write().unwrap().remove(&token);
+        state.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(&token);
     }
     let mut resp = ok(json!({"authenticated": false})).into_response();
     for c in clear_cookies(&state) {
@@ -123,7 +123,7 @@ pub async fn logout(State(state): State<AppState>, req: axum::extract::Request) 
 
 pub async fn session(State(state): State<AppState>, req: axum::extract::Request) -> Response {
     let found = super::cookie_value(&req, "routerd_sid").and_then(|token| {
-        let mut store = state.sessions.write().unwrap();
+        let mut store = state.sessions.write().unwrap_or_else(|e| e.into_inner());
         match store.get_mut(&token) {
             Some(s) if !s.expired() => {
                 s.last_seen = std::time::Instant::now();

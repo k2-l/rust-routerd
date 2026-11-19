@@ -9,20 +9,18 @@ OUT="${OUT:-/root/cudy/work/firmware}"
 PROFILE="${PROFILE:-cudy_tr3000-v1}"
 JOBS="${JOBS:-$(nproc)}"
 
-# Remove the stock web UI/server; add a tiny iproute2 for `ip route`.
 REMOVE="-luci-light -luci-app-package-manager -luci-compat -luci-lib-base -luci-lib-ipkg -luci-i18n-base-zh-cn -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua"
-# ip-tiny: predictable `ip route`; rpcd-mod-iwinfo: ubus iwinfo object.
-ADD="ip-tiny rpcd rpcd-mod-iwinfo"
+ADD="ip-tiny rpcd rpcd-mod-iwinfo conntrack"
 
 mkdir -p "$OUT"
 cd "$IB"
 make image \
-	PROFILE="$PROFILE" \
-	PACKAGES="$REMOVE $ADD" \
-	FILES="$ROOT/packaging/files" \
-	EXTRA_IMAGE_NAME="routerd" \
-	BIN_DIR="$OUT" \
-	-j"$JOBS"
+  PROFILE="$PROFILE" \
+  PACKAGES="$REMOVE $ADD" \
+  FILES="$ROOT/packaging/files" \
+  EXTRA_IMAGE_NAME="routerd" \
+  BIN_DIR="$OUT" \
+  -j"$JOBS"
 
 echo
 echo "=== images ==="

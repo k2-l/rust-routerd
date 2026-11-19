@@ -10,7 +10,7 @@ use crate::openwrt::sys;
 use crate::state::AppState;
 
 const UPLOAD_PATH: &str = "/tmp/routerd-firmware.bin";
-const MAX_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_SIZE: u64 = 32 * 1024 * 1024;
 
 /// OpenWrt sysupgrade images are tar archives whose first entry is
 /// `sysupgrade-<board>/`. This is a cheap sanity check, not a full verifier.
@@ -52,6 +52,7 @@ pub async fn upload(mut multipart: Multipart) -> ApiResult<Json<Value>> {
         }
         found = true;
 
+        let _ = tokio::fs::remove_file(UPLOAD_PATH).await;
         let mut file = tokio::fs::File::create(UPLOAD_PATH)
             .await
             .map_err(|e| ApiError::internal(format!("创建临时文件失败: {e}")))?;
@@ -64,7 +65,7 @@ pub async fn upload(mut multipart: Multipart) -> ApiResult<Json<Value>> {
             size += chunk.len() as u64;
             if size > MAX_SIZE {
                 let _ = tokio::fs::remove_file(UPLOAD_PATH).await;
-                return Err(ApiError::bad("固件文件超过 64MB"));
+                return Err(ApiError::bad("固件文件超过 32MB"));
             }
             if head.len() < 512 {
                 let need = 512 - head.len();
