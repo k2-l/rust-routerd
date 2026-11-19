@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070b16">
+<title>routerd · 路由控制台</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="boot" class="boot">
+  <div class="boot-ring"></div>
+  <div class="boot-text">routerd</div>
+</div>
+
+<section id="login-view" class="login hidden">
+  <div class="login-orb orb-a"></div>
+  <div class="login-orb orb-b"></div>
+  <div class="login-card">
+    <div class="brand brand-lg">
+      <span class="brand-mark" id="login-mark"></span>
+      <span class="brand-name">routerd</span>
+    </div>
+    <p class="login-sub">高性能路由器控制台</p>
+    <div class="login-device" id="login-device">正在识别设备…</div>
+    <form id="login-form" autocomplete="off">
+      <label class="field">
+        <span>管理员账号</span>
+        <input name="username" value="root" autocomplete="username" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码">
+      </label>
+      <div id="login-error" class="form-error hidden"></div>
+      <button class="btn btn-primary btn-block" type="submit" id="login-btn">进入控制台</button>
+    </form>
+    <div class="login-foot">
+      <span id="login-version">routerd</span>
+      <span id="login-tls"></span>
+    </div>
+  </div>
+</section>
+
+<div id="app" class="shell hidden">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" id="side-mark"></span>
+      <span class="brand-name">routerd</span>
+    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-view="overview" title="概览"></button>
+      <button class="nav-item" data-view="network" title="网络"></button>
+      <button class="nav-item" data-view="wireless" title="无线"></button>
+      <button class="nav-item" data-view="clients" title="客户端"></button>
+      <button class="nav-item" data-view="access" title="访问控制"></button>
+      <button class="nav-item" data-view="firewall" title="防火墙"></button>
+      <button class="nav-item" data-view="system" title="系统"></button>
+      <button class="nav-item" data-view="logs" title="日志"></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="pulse-dot"></div>
+      <div>
+        <div class="foot-title" id="side-host">router</div>
+        <div class="foot-sub" id="side-ver">routerd</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="view-title">概览</h1>
+        <p id="view-sub" class="view-sub">设备运行状态</p>
+      </div>
+      <div class="top-actions">
+        <div class="live-pill"><span class="pulse-dot"></span><span id="top-host">router</span></div>
+        <button class="icon-btn" id="btn-refresh" title="刷新"></button>
+        <button class="icon-btn" id="btn-logout" title="退出登录"></button>
+      </div>
+    </header>
+    <div id="view" class="view"></div>
+  </main>
+
+  <nav class="mobile-nav" id="mobile-nav"></nav>
+</div>
+
+<div id="toast" class="toast"></div>
+<div id="modal-root"></div>
+<script src="/app.js"></script>
+</body>
+</html>

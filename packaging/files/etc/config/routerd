@@ -1,0 +1,6 @@
+config routerd 'main'
+	option enabled '1'
+	option http '0.0.0.0:80'
+	option https '0.0.0.0:443'
+	option tls '1'
+	option data_dir '/etc/routerd'

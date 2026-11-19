@@ -1,0 +1,148 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "routerd Agent API",
+    "version": "v1",
+    "description": "Machine-to-machine API for controlling router device access. Use it to list newly connected devices, approve them for Internet access, revoke or block them, and toggle default-deny enforcement."
+  },
+  "servers": [{ "url": "/api/agent/v1" }],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Token created in routerd UI, format rd_..." }
+    },
+    "schemas": {
+      "Selector": {
+        "type": "object",
+        "properties": {
+          "mac": { "type": "string", "description": "AA:BB:CC:DD:EE:FF (any common separator accepted)" },
+          "ip": { "type": "string", "description": "Current DHCP/ARP IPv4 address" },
+          "hostname": { "type": "string", "description": "DHCP hostname, exact then substring, case-insensitive" },
+          "name": { "type": "string", "description": "Label previously assigned by a user or agent" }
+        }
+      },
+      "Device": {
+        "type": "object",
+        "properties": {
+          "mac": { "type": "string" },
+          "ip": { "type": "string" },
+          "hostname": { "type": "string" },
+          "name": { "type": "string" },
+          "label": { "type": "string" },
+          "note": { "type": "string" },
+          "online": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["pending", "authorized", "blocked"] },
+          "authorized": { "type": "boolean" },
+          "blocked": { "type": "boolean" },
+          "first_seen": { "type": "integer" },
+          "last_seen": { "type": "integer" },
+          "expires_at": { "type": "integer", "description": "0 means permanent" }
+        }
+      },
+      "Ok": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean", "const": true },
+          "data": { "type": "object" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean", "const": false },
+          "error": { "type": "string" },
+          "code": { "type": "string" },
+          "candidates": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/status": {
+      "get": {
+        "summary": "Enforcement and device counts",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/devices": {
+      "get": {
+        "summary": "List devices",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string", "enum": ["all", "pending", "authorized", "blocked", "online"] } },
+          { "name": "online", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }
+        ],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/devices/pending": {
+      "get": { "summary": "Devices waiting for authorization", "responses": { "200": { "description": "ok" } } }
+    },
+    "/devices/{mac}": {
+      "get": {
+        "summary": "Get one device",
+        "parameters": [{ "name": "mac", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "ok" }, "404": { "description": "not found" } }
+      }
+    },
+    "/devices/authorize": {
+      "post": {
+        "summary": "Authorize a device for Internet access",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "allOf": [
+              { "$ref": "#/components/schemas/Selector" },
+              { "type": "object", "properties": {
+                  "name": { "type": "string", "description": "Label to store on the device" },
+                  "note": { "type": "string" },
+                  "expires_in": { "type": "integer", "description": "Seconds; 0 = permanent; max 90 days" }
+              } }
+            ]
+          }, "examples": {
+            "byMac": { "value": { "mac": "AA:BB:CC:DD:EE:FF", "name": "living room TV", "expires_in": 0 } },
+            "byIp": { "value": { "ip": "192.168.1.101", "name": "guest phone" } },
+            "byHostname": { "value": { "selector": { "hostname": "MiTV" } } }
+          } } }
+        },
+        "responses": {
+          "200": { "description": "authorized" },
+          "404": { "description": "no matching device" },
+          "409": { "description": "multiple devices match; see candidates" }
+        }
+      }
+    },
+    "/devices/revoke": {
+      "post": { "summary": "Revoke authorization", "responses": { "200": { "description": "ok" } } }
+    },
+    "/devices/block": {
+      "post": { "summary": "Block a device (MAC may be pre-blocked)", "responses": { "200": { "description": "ok" } } }
+    },
+    "/devices/unblock": {
+      "post": { "summary": "Remove a block", "responses": { "200": { "description": "ok" } } }
+    },
+    "/enforcement": {
+      "post": {
+        "summary": "Enable or disable default-deny for unknown devices",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "examples": {
+            "enable": { "value": { "enabled": true, "authorize_current": true } },
+            "disable": { "value": { "enabled": false } }
+          }, "schema": { "type": "object", "properties": {
+            "enabled": { "type": "boolean" },
+            "authorize_current": { "type": "boolean", "default": true }
+          }, "required": ["enabled"] } } }
+        },
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/audit": {
+      "get": {
+        "summary": "Recent access audit entries (JSON lines)",
+        "parameters": [{ "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }],
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}

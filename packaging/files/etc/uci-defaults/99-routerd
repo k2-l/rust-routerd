@@ -1,0 +1,29 @@
+#!/bin/sh
+# routerd first-boot defaults
+# Sets a documented default root password (admin) only when root has no
+# usable password, and forces the administrator to change it on first login.
+
+DEFAULT_HASH='$6$routerdtr3000$UXRO8PZeZOJaHqQIuxKypH7YtQo/N3KNJswR7b1dbtKo04E0PguFR2guZTfIXcBAwYz6tZhTOit/79A3ZixG50'
+
+mkdir -p /etc/routerd
+
+if [ ! -f /etc/shadow ]; then
+	printf 'root:%s:19000:0:99999:7:::\n' "$DEFAULT_HASH" > /etc/shadow
+	chmod 600 /etc/shadow
+	: > /etc/routerd/must_change
+elif ! grep -q '^root:[^:!*]' /etc/shadow; then
+	sed -i "s|^root:[^:]*:|root:${DEFAULT_HASH}:|" /etc/shadow
+	chmod 600 /etc/shadow
+	: > /etc/routerd/must_change
+fi
+
+# Stock web stack is not part of this image, but handle preserved configs.
+if [ -x /etc/init.d/uhttpd ]; then
+	/etc/init.d/uhttpd stop 2>/dev/null
+	/etc/init.d/uhttpd disable 2>/dev/null
+fi
+
+# Make sure routerd is enabled for this boot and future boots.
+[ -x /etc/init.d/routerd ] && /etc/init.d/routerd enable 2>/dev/null
+
+exit 0
