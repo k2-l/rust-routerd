@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Verify a built TR3000 firmware: size budget, rootfs contents, removed web stack.
+# Verify a built ImmortalWrt 25.12 TR3000 firmware: size budget, rootfs contents,
+# apk package database, and removed legacy web/IPv6 stacks.
 set -euo pipefail
 
 WORK="${WORK:-/root/cudy/work}"
@@ -39,15 +40,19 @@ check "first-boot defaults" "[ -x '$R/etc/uci-defaults/99-routerd' ]"
 check "embedded UI not on disk" "[ ! -e '$R/www/luci-static' ]"
 
 echo
-echo "== stock web stack removed =="
+echo "== stock web / ipv6 / opkg stacks removed =="
 check "no uhttpd binary" "[ ! -e '$R/usr/sbin/uhttpd' ]"
 check "no LuCI lua tree" "[ ! -d '$R/usr/lib/lua/luci' ]"
 check "no LuCI www tree" "[ ! -d '$R/www/luci-static' ]"
+check "no odhcp6c binary" "[ ! -e '$R/usr/sbin/odhcp6c' ]"
+check "no odhcpd binary" "[ ! -e '$R/usr/sbin/odhcpd' ]"
+check "no legacy opkg status" "[ ! -e '$R/usr/lib/opkg/status' ]"
+check "apk database present" "[ -f '$R/lib/apk/db/installed' ]"
 
 echo
-echo "== required runtime packages =="
-for p in rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
-	check "package $p" "grep -q '^Package: $p\$' '$R/usr/lib/opkg/status'"
+echo "== required runtime packages (ImmortalWrt 25.12 apk) =="
+for p in apk-mbedtls rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
+	check "package $p" "grep -q '^P:$p\$' '$R/lib/apk/db/installed'"
 done
 
 echo
