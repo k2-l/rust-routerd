@@ -50,11 +50,26 @@ pub async fn reload() -> ApiResult<Json<Value>> {
     Ok(ok(json!({"reloaded": true})))
 }
 
-pub async fn clients() -> ApiResult<Json<Value>> {
-    let data = tokio::task::spawn_blocking(|| {
-        let clients = wireless::clients();
+pub async fn clients(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+) -> ApiResult<Json<Value>> {
+    let data = tokio::task::spawn_blocking(move || {
+        let mut clients = wireless::clients();
         let leases = net::leases();
         let arp = net::arp_table();
+        let store = state.access.read().unwrap_or_else(|e| e.into_inner());
+        for c in &mut clients {
+            if let Some(mac) = c["mac"].as_str() {
+                if let Some(dev) = store.get(mac) {
+                    if !dev.name.is_empty() {
+                        c["alias"] = json!(dev.name);
+                    }
+                    c["rx_limit_kbps"] = json!(dev.rx_limit_kbps);
+                    c["tx_limit_kbps"] = json!(dev.tx_limit_kbps);
+                    c["blocked"] = json!(dev.blocked);
+                }
+            }
+        }
         json!({
             "clients": clients,
             "leases": leases,

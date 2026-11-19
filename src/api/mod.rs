@@ -149,12 +149,19 @@ fn protected_router(state: AppState) -> Router {
     Router::new()
         .route("/api/system", get(system::info))
         .route("/api/system/history", get(system::history))
+        .route("/api/events", get(system::events))
         .route("/api/system/reboot", post(system::reboot))
+        .route("/api/system/factory-reset", post(system::factory_reset))
+        .route("/api/system/backup", get(system::backup))
+        .route("/api/system/restore", post(system::restore).layer(DefaultBodyLimit::max(4 * 1024 * 1024)))
         .route("/api/system/hostname", put(system::set_hostname))
         .route("/api/system/password", post(auth::change_password))
         .route("/api/logs", get(system::logs))
         .route("/api/network", get(network::get))
+        .route("/api/network/mode", get(network::get_mode).put(network::set_mode))
         .route("/api/network/hardware", get(network::hardware))
+        .route("/api/network/ports/swap", post(network::swap_ports))
+        .route("/api/network/diag", post(network::diag))
         .route("/api/network/wan", put(network::update_wan))
         .route("/api/network/wan/redial", post(network::redial))
         .route("/api/network/wan/pppoe-log", get(network::pppoe_log))
@@ -181,6 +188,7 @@ fn protected_router(state: AppState) -> Router {
         .route("/api/access/devices/{mac}/revoke", post(access::revoke))
         .route("/api/access/devices/{mac}/block", post(access::block))
         .route("/api/access/devices/{mac}/unblock", post(access::unblock))
+        .route("/api/access/devices/{mac}/limit", post(access::rate_limit))
         .route(
             "/api/agents",
             get(access::list_agents).post(access::create_agent),

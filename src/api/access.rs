@@ -208,6 +208,52 @@ pub async fn unblock(
     mutate(&state, &ip.to_string(), &mac, "unblock", None).await
 }
 
+#[derive(Deserialize, Default)]
+pub struct RateLimitBody {
+    #[serde(default)]
+    rx_limit_kbps: u64,
+    #[serde(default)]
+    tx_limit_kbps: u64,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+pub async fn rate_limit(
+    State(state): State<AppState>,
+    Extension(PeerAddr(ip)): Extension<PeerAddr>,
+    Path(mac): Path<String>,
+    Json(body): Json<RateLimitBody>,
+) -> ApiResult<Json<Value>> {
+    let mac = normalize_mac(&mac).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
+    let rx = body.rx_limit_kbps.min(10_000_000);
+    let tx = body.tx_limit_kbps.min(10_000_000);
+
+    let (device, snapshot) = {
+        let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
+        let device = store.set_rate_limit(&mac, rx, tx, body.name.as_deref());
+        store
+            .save(&format!("{}/access.json", state.data_dir))
+            .map_err(ApiError::from)?;
+        (device, store.clone())
+    };
+
+    let data_dir = state.data_dir.to_string();
+    let sim = state.sim;
+    tokio::task::spawn_blocking(move || nft::apply_qos(&snapshot, &data_dir, sim))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+
+    agents::audit(
+        &state.data_dir,
+        "session:root",
+        "rate_limit",
+        &device.mac,
+        &format!("rx={rx}kbps,tx={tx}kbps"),
+        &ip.to_string(),
+    );
+    Ok(ok(json!({ "device": device.view(now_unix()) })))
+}
+
 // ---------------- AI token management ----------------
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Value> {

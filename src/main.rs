@@ -111,10 +111,19 @@ async fn serve_tls(
                 let app = app.clone().layer(Extension(PeerAddr(peer.ip())));
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let tls = match acceptor.accept(stream).await {
-                        Ok(t) => t,
-                        Err(e) => {
+                    let tls = match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        acceptor.accept(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(t)) => t,
+                        Ok(Err(e)) => {
                             tracing::debug!("tls handshake failed from {peer}: {e}");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!("tls handshake timed out from {peer}");
                             return;
                         }
                     };
@@ -206,7 +215,7 @@ async fn main() {
                 let access = access.clone();
                 let data_dir = data_dir.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    let mut store = access.write().unwrap();
+                    let mut store = access.write().unwrap_or_else(|e| e.into_inner());
                     let changed = store.scan();
                     if changed {
                         let _ = store.save(&format!("{data_dir}/access.json"));
@@ -227,9 +236,12 @@ async fn main() {
         let sim = state.sim;
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || {
-                let store = access.read().unwrap();
+                let store = access.read().unwrap_or_else(|e| e.into_inner());
                 if let Err(e) = access::nft::bootstrap(&store, &data_dir, sim) {
                     tracing::error!("access enforcement bootstrap failed: {e:#}");
+                }
+                if let Err(e) = access::nft::apply_qos(&store, &data_dir, sim) {
+                    tracing::warn!("qos rate-limit bootstrap failed: {e:#}");
                 }
             })
             .await;

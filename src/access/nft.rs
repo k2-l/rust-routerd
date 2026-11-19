@@ -10,9 +10,11 @@ use crate::util;
 const TABLE_SEC: &str = "routerd_auth_table";
 const RULE_SEC: &str = "routerd_auth_rule";
 const INPUT_SEC: &str = "routerd_auth_input";
+const QOS_SEC: &str = "routerd_qos_forward";
 const TABLE_FILE: &str = "auth-table.nft";
 const RULE_FILE: &str = "auth-forward.nft";
 const INPUT_FILE: &str = "auth-input.nft";
+const QOS_FILE: &str = "qos-forward.nft";
 
 fn lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
@@ -303,4 +305,60 @@ pub fn bootstrap(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
             nft_sync(store)
         }
     }
+}
+
+pub fn apply_qos(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
+    if sim {
+        return Ok(());
+    }
+    let _guard = lock().lock().unwrap();
+    let iface = lan_iface();
+    let limits = store.rate_limited_devices();
+    let qos_path = format!("{data_dir}/{QOS_FILE}");
+
+    let mut rules = String::new();
+    for (mac, rx_kbps, tx_kbps) in &limits {
+        let m = mac.to_ascii_lowercase();
+        if *tx_kbps > 0 {
+            let kbytes = (*tx_kbps / 8).max(1);
+            let burst = (kbytes / 2).max(4);
+            rules.push_str(&format!(
+                "iifname \"{iface}\" ether saddr {m} limit rate over {kbytes} kbytes/second burst {burst} kbytes drop comment \"routerd: tx limit {m}\"\n"
+            ));
+        }
+        if *rx_kbps > 0 {
+            let kbytes = (*rx_kbps / 8).max(1);
+            let burst = (kbytes / 2).max(4);
+            rules.push_str(&format!(
+                "oifname \"{iface}\" ether daddr {m} limit rate over {kbytes} kbytes/second burst {burst} kbytes drop comment \"routerd: rx limit {m}\"\n"
+            ));
+        }
+    }
+
+    let cfg = uci::load("firewall").unwrap_or_default();
+    if limits.is_empty() {
+        let _ = std::fs::remove_file(&qos_path);
+        if cfg.section(QOS_SEC).is_some() {
+            let _ = util::run_ok(uci::bin(), &["-q", "delete", &format!("firewall.{QOS_SEC}")]);
+            let _ = util::run(uci::bin(), &["commit", "firewall"]);
+            reload_fw4()?;
+        }
+        return Ok(());
+    }
+
+    util::write_atomic(&qos_path, rules.as_bytes(), 0o644)?;
+    let needs_uci = cfg
+        .section(QOS_SEC)
+        .map(|s| {
+            s.kind != "include"
+                || s.get("path") != Some(qos_path.as_str())
+                || s.get("chain") != Some("forward")
+        })
+        .unwrap_or(true);
+    if needs_uci {
+        ensure_include(QOS_SEC, data_dir, QOS_FILE, "chain-prepend", Some("forward"))?;
+        util::run(uci::bin(), &["commit", "firewall"])?;
+    }
+    reload_fw4()?;
+    Ok(())
 }

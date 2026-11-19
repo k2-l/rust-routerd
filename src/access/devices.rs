@@ -57,6 +57,12 @@ pub struct Device {
     /// 0 = permanent.
     #[serde(default)]
     pub expires_at: u64,
+    /// Download rate limit in Kbps (0 = unlimited).
+    #[serde(default)]
+    pub rx_limit_kbps: u64,
+    /// Upload rate limit in Kbps (0 = unlimited).
+    #[serde(default)]
+    pub tx_limit_kbps: u64,
     #[serde(skip)]
     pub online: bool,
 }
@@ -91,6 +97,8 @@ impl Device {
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "expires_at": self.expires_at,
+            "rx_limit_kbps": self.rx_limit_kbps,
+            "tx_limit_kbps": self.tx_limit_kbps,
         })
     }
 }
@@ -286,6 +294,36 @@ impl DeviceStore {
         let device = self.devices.get_mut(mac)?;
         device.blocked = false;
         Some(device.clone())
+    }
+
+    pub fn set_rate_limit(
+        &mut self,
+        mac: &str,
+        rx_limit_kbps: u64,
+        tx_limit_kbps: u64,
+        name: Option<&str>,
+    ) -> Device {
+        let now = now_unix();
+        let device = self.devices.entry(mac.to_string()).or_insert_with(|| Device {
+            mac: mac.to_string(),
+            first_seen: now,
+            last_seen: now,
+            ..Device::default()
+        });
+        device.rx_limit_kbps = rx_limit_kbps;
+        device.tx_limit_kbps = tx_limit_kbps;
+        if let Some(n) = name {
+            device.name = n.trim().to_string();
+        }
+        device.clone()
+    }
+
+    pub fn rate_limited_devices(&self) -> Vec<(String, u64, u64)> {
+        self.devices
+            .values()
+            .filter(|d| !d.blocked && (d.rx_limit_kbps > 0 || d.tx_limit_kbps > 0))
+            .map(|d| (d.mac.clone(), d.rx_limit_kbps, d.tx_limit_kbps))
+            .collect()
     }
 
     pub fn set_enforcement(&mut self, enabled: bool, authorize_current: bool) -> bool {

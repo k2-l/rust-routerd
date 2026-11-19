@@ -27,7 +27,7 @@ const ICON = {
   router: `<svg ${SVG_ATTR}><rect x="2" y="13" width="20" height="7" rx="2"/><path d="M6 16.5h.01M10 16.5h.01M14 16.5h4M7 13V7M17 13V7M5 5a4 4 0 0 1 4 0M15 5a4 4 0 0 1 4 0"/></svg>`,
 };
 
-const state = { csrf: null, meta: {}, view: 'overview', timer: null, wanIp: '' };
+const state = { csrf: null, meta: {}, view: 'overview', timer: null, sse: null, wanIp: '' };
 
 const VIEWS = {
   overview: { label: '系统总览', title: '系统总览', sub: '全息网络拓扑、物理网口与硬件卸载遥测', icon: 'overview', render: renderOverview },
@@ -245,7 +245,7 @@ function bindTopButtons() {
   };
 }
 
-function clearTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+function clearTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } if (state.sse) { state.sse.close(); state.sse = null; } }
 function setTimer(fn, ms) { clearTimer(); state.timer = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, ms); }
 
 async function go(view) {
@@ -428,16 +428,24 @@ async function renderOverview() {
     catch (e) { handleErr(e); }
   };
 
-  setTimer(async () => {
-    const [ns, nh] = await Promise.all([api('/api/system'), api('/api/system/history')]);
-    if (state.view !== 'overview') return;
-    const r = $('#ov-rates');
-    if (r) r.textContent = `↓ ${fmtRate(ns.traffic.rx_kbps)} · ↑ ${fmtRate(ns.traffic.tx_kbps)}`;
-    const g = $('#ov-gauges');
-    if (g) g.innerHTML = ringGauge(ns.cpu.usage, '#22d3ee', 'CPU 负载', `${ns.cpu.cores} 核 · ${ns.temperature != null ? Math.round(ns.temperature) + '°C' : '正常'}`)
-      + ringGauge(ns.memory.percent, '#a78bfa', '内存占用', `${fmtBytes(ns.memory.used)} / ${fmtBytes(ns.memory.total)}`);
-    drawTraffic($('#traffic-chart'), nh.rx, nh.tx);
-  }, 2500);
+  if (window.EventSource) {
+    const es = new EventSource('/api/events');
+    state.sse = es;
+    es.addEventListener('telemetry', (ev) => {
+      if (state.view !== 'overview') return;
+      try {
+        const t = JSON.parse(ev.data);
+        const r = $('#ov-rates');
+        if (r) r.textContent = `↓ ${fmtRate(t.rx_kbps)} · ↑ ${fmtRate(t.tx_kbps)}`;
+        hist.rx = [...(hist.rx || []).slice(-179), t.rx_kbps];
+        hist.tx = [...(hist.tx || []).slice(-179), t.tx_kbps];
+        drawTraffic($('#traffic-chart'), hist.rx, hist.tx);
+        const g = $('#ov-gauges');
+        if (g) g.innerHTML = ringGauge(t.cpu, '#22d3ee', 'CPU 负载', `${sys.cpu.cores} 核 · ${sys.temperature != null ? Math.round(sys.temperature) + '°C' : '正常'}`)
+          + ringGauge(t.mem, '#a78bfa', '内存占用', `${fmtBytes(sys.memory.used)} / ${fmtBytes(sys.memory.total)}`);
+      } catch (_) {}
+    });
+  }
 }
 
 async function doReboot() {
@@ -447,12 +455,36 @@ async function doReboot() {
 }
 
 async function renderNetwork() {
-  const [d, hw] = await Promise.all([api('/api/network'), api('/api/network/hardware').catch(() => ({ ports: [] }))]);
+  const [d, hw, modeRes] = await Promise.all([
+    api('/api/network'),
+    api('/api/network/hardware').catch(() => ({ ports: [] })),
+    api('/api/network/mode').catch(() => ({ mode: 'router' })),
+  ]);
   const wan = d.wan, w = d.wan_status || {}, ipv4 = (w.ipv4 && w.ipv4[0]) || null;
+  const curMode = (modeRes && modeRes.mode) || 'router';
 
   $('#view').innerHTML = `
     <div class="card">
-      <div class="card-title"><h2>物理网口连接拓扑</h2><span class="sub">DSA 硬件交换机接口</span></div>
+      <div class="row-between wrap gap-14">
+        <div>
+          <h2 style="margin:0;font-size:15px">设备工作模式</h2>
+          <p class="muted tiny" style="margin:4px 0 0">支持路由拨号模式与有线中继 (AP) 模式一键切换</p>
+        </div>
+        <div class="card-actions">
+          <button class="btn btn-sm ${curMode === 'router' ? 'btn-primary' : ''}" id="mode-router">路由模式 (NAT)</button>
+          <button class="btn btn-sm ${curMode === 'ap' ? 'btn-primary' : ''}" id="mode-ap">有线中继 (AP)</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mt-20">
+      <div class="card-title">
+        <h2>物理网口连接拓扑</h2>
+        <div class="card-actions">
+          <span class="sub">DSA 硬件交换机 · 纯 IPv4</span>
+          <button class="btn btn-sm" id="swap-ports-btn">${icon('refresh')}互换 WAN / LAN 端口</button>
+        </div>
+      </div>
       ${renderPortRack(hw.ports)}
     </div>
 
@@ -531,6 +563,20 @@ async function renderNetwork() {
         </div>
         <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}保存 LAN 设置</button></div>
       </form>
+    </div>
+
+    <div class="card mt-20">
+      <div class="card-title"><h2>网络连通性诊断</h2><span class="sub">Ping / 路由追踪 / DNS 解析</span></div>
+      <form id="diag-form" class="row wrap gap-10">
+        <select name="tool" style="width:140px">
+          <option value="ping">Ping 测试</option>
+          <option value="traceroute">路由追踪</option>
+          <option value="nslookup">DNS 解析</option>
+        </select>
+        <input name="host" value="223.5.5.5" placeholder="输入域名或 IPv4 地址" style="flex:1;min-width:200px" required>
+        <button class="btn btn-primary" type="submit" id="diag-btn">开始测试</button>
+      </form>
+      <pre class="log mt-14 hidden" id="diag-out" style="max-height:220px"></pre>
     </div>`;
 
   const loadPppoeLog = async () => {
@@ -542,6 +588,40 @@ async function renderNetwork() {
   };
   loadPppoeLog();
   $('#pppoe-log-refresh').onclick = loadPppoeLog;
+  const switchMode = async (targetMode) => {
+    if (targetMode === curMode) return;
+    const msg = targetMode === 'ap'
+      ? '切换为有线中继 (AP) 模式后，本机将关闭 DHCP 并从上级主路由获取管理 IP。确定切换？'
+      : '切换为路由模式后，LAN 管理地址将恢复为 192.168.1.1 并开启 DHCP 服务。确定切换？';
+    if (!await confirmDialog('切换工作模式', msg, '确认切换')) return;
+    try {
+      await api('/api/network/mode', { method: 'PUT', body: { mode: targetMode } });
+      toast('工作模式已切换，网络正在重载…');
+    } catch (e) { handleErr(e); }
+  };
+  $('#mode-router').onclick = () => switchMode('router');
+  $('#mode-ap').onclick = () => switchMode('ap');
+  $('#swap-ports-btn').onclick = async () => {
+    if (!await confirmDialog('互换 WAN / LAN 物理网口', '将把当前 WAN 口与 LAN 口（如 2.5G 口与 1G 口）角色对调，请随后对调网线。确定继续？', '确认互换')) return;
+    try {
+      const res = await api('/api/network/ports/swap', { method: 'POST' });
+      toast(`端口已互换，当前 WAN 口为 ${res.wan_device}`);
+      setTimeout(() => go('network'), 1500);
+    } catch (e) { handleErr(e); }
+  };
+  $('#diag-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const btn = $('#diag-btn'), out = $('#diag-out');
+    btn.disabled = true; btn.textContent = '正在探测…';
+    out.classList.remove('hidden'); out.textContent = '正在执行网络诊断，请稍候…';
+    try {
+      const res = await api('/api/network/diag', { method: 'POST', body: { tool: f.get('tool'), host: f.get('host') } });
+      out.textContent = res.output || '(无输出)';
+    } catch (ex) { out.textContent = ex.message || '测试失败'; handleErr(ex); }
+    finally { btn.disabled = false; btn.textContent = '开始测试'; }
+  };
+
   $('#wan-redial').onclick = async () => {
     try { await api('/api/network/wan/redial', { method: 'POST' }); toast('正在断开并重新拨号…'); setTimeout(loadPppoeLog, 1800); }
     catch (e) { handleErr(e); }
@@ -660,25 +740,67 @@ async function renderClients() {
   const d = await api('/api/clients');
   const rows = (d.clients || []).map((c) => {
     const lease = (d.leases || []).find((l) => l.mac === c.mac);
-    const name = c.hostname || (lease && lease.hostname) || c.mac;
+    const name = c.alias || c.hostname || (lease && lease.hostname) || c.mac;
+    const rxLim = Number(c.rx_limit_kbps) || 0;
+    const txLim = Number(c.tx_limit_kbps) || 0;
+    const qosBadge = (rxLim > 0 || txLim > 0)
+      ? `<span class="badge warn">↓${rxLim ? fmtRate(rxLim) : '不限'} / ↑${txLim ? fmtRate(txLim) : '不限'}</span>`
+      : `<span class="badge muted">不限速</span>`;
     return `<tr>
       <td><div class="primary">${esc(name)}</div><div class="tiny muted mono">${esc(c.mac)}</div></td>
       <td class="mono">${esc(c.ip || (lease && lease.ip) || '—')}</td>
       <td><span class="badge ${c.wireless ? 'muted' : 'good'}">${c.wireless ? '无线 Wi-Fi' : '有线网口'}</span></td>
       <td>${c.wireless ? `${signalBars(c.signal)} <span class="tiny muted">${c.signal != null ? esc(c.signal) + ' dBm' : ''}</span>` : '—'}</td>
-      <td class="mono">${c.rx && c.rx.bytes ? fmtBytes(c.rx.bytes) : '—'}</td>
-      <td class="mono">${c.tx && c.tx.bytes ? fmtBytes(c.tx.bytes) : '—'}</td>
+      <td>${qosBadge}</td>
+      <td class="right nowrap">
+        <button class="btn btn-sm" data-qos-mac="${esc(c.mac)}" data-qos-name="${esc(c.alias || '')}" data-qos-rx="${rxLim}" data-qos-tx="${txLim}">限速 / 备注</button>
+      </td>
     </tr>`;
   }).join('');
 
   $('#view').innerHTML = `
     <div class="card">
-      <div class="card-title"><h2>在线终端列表</h2><span class="sub">${(d.clients || []).length} 台设备在线</span></div>
+      <div class="card-title"><h2>在线终端列表与 QoS 限速</h2><span class="sub">${(d.clients || []).length} 台设备在线</span></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>设备名称 / MAC</th><th>IP 地址</th><th>接入介质</th><th>信号强度</th><th>累计下载</th><th>累计上传</th></tr></thead>
+        <thead><tr><th>设备名称 / MAC</th><th>IP 地址</th><th>接入介质</th><th>信号强度</th><th>带宽策略</th><th class="right">管理</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="6" class="empty">暂无在线设备</td></tr>'}</tbody>
       </table></div>
     </div>`;
+
+  $$('[data-qos-mac]').forEach((b) => {
+    b.onclick = () => openModal(
+      `<h3>终端备注与带宽限速</h3>
+       <p class="sub mono">${esc(b.dataset.qosMac)} · 设为 0 表示不限制速率</p>
+       <form id="qos-f">
+         <label class="field"><span>设备别名备注</span><input name="name" value="${esc(b.dataset.qosName)}" placeholder="例如：客厅电视 / 书房电脑" maxlength="32"></label>
+         <div class="field-row">
+           <label class="field"><span>下载限速 (Kbps)</span><input name="rx" type="number" min="0" max="10000000" value="${esc(b.dataset.qosRx)}" placeholder="例如 10000 = 10Mbps"></label>
+           <label class="field"><span>上传限速 (Kbps)</span><input name="tx" type="number" min="0" max="10000000" value="${esc(b.dataset.qosTx)}" placeholder="例如 2000 = 2Mbps"></label>
+         </div>
+         <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">保存策略</button></div>
+       </form>`,
+      {
+        onMount(el, close) {
+          el.querySelector('[data-cancel]').onclick = close;
+          el.querySelector('#qos-f').onsubmit = async (e) => {
+            e.preventDefault();
+            const f = new FormData(e.target);
+            try {
+              await api(`/api/access/devices/${encodeURIComponent(b.dataset.qosMac)}/limit`, {
+                method: 'POST',
+                body: {
+                  name: f.get('name'),
+                  rx_limit_kbps: Number(f.get('rx')) || 0,
+                  tx_limit_kbps: Number(f.get('tx')) || 0,
+                },
+              });
+              close(); toast('终端策略已生效'); go('clients');
+            } catch (ex) { handleErr(ex); }
+          };
+        },
+      }
+    );
+  });
 }
 
 async function renderAccess() {
@@ -852,6 +974,19 @@ async function renderSystem() {
         </div>
         <div class="tiny muted mt-14" id="fw-note">刷机过程中严禁断电。</div>
       </div>
+    </div>
+
+    <div class="card mt-20">
+      <div class="card-title"><h2>配置备份与系统重置</h2><span class="sub">UCI / ETC 持久化数据</span></div>
+      <div class="row-between wrap gap-14">
+        <div class="muted tiny">导出当前网络、无线与黑白名单配置归档，或恢复到出厂默认状态。</div>
+        <div class="card-actions">
+          <input type="file" id="cfg-restore-file" accept=".gz,.tar.gz" class="hidden">
+          <a class="btn" href="/api/system/backup" download="routerd-backup.tar.gz">${icon('save')}导出配置备份</a>
+          <button class="btn" id="cfg-restore-btn">${icon('upload')}恢复配置</button>
+          <button class="btn btn-danger" id="sys-factory-reset">${icon('power')}恢复出厂设置</button>
+        </div>
+      </div>
     </div>`;
 
   $('#host-form').onsubmit = async (e) => {
@@ -895,6 +1030,28 @@ async function renderSystem() {
     if (!await confirmDialog('确认刷写固件', '设备将写入新固件并自动重启，确定继续？', '立即刷写', true)) return;
     try { await api('/api/firmware/apply', { method: 'POST', body: { keep_config: $('#fw-keep').checked } }); toast('正在刷写固件…'); }
     catch (e) { handleErr(e); }
+  };
+
+  const restoreInput = $('#cfg-restore-file');
+  $('#cfg-restore-btn').onclick = () => restoreInput.click();
+  restoreInput.onchange = async () => {
+    const file = restoreInput.files && restoreInput.files[0];
+    if (!file) return;
+    if (!await confirmDialog('恢复配置备份', `确定使用 ${file.name} 覆盖当前配置并重启路由器？`, '恢复并重启', true)) return;
+    const fd = new FormData();
+    fd.append('backup', file, file.name);
+    try {
+      await api('/api/system/restore', { method: 'POST', body: fd });
+      toast('配置已恢复，设备正在重启…');
+    } catch (e) { handleErr(e); }
+  };
+
+  $('#sys-factory-reset').onclick = async () => {
+    if (!await confirmDialog('恢复出厂设置', '所有自定义网络、Wi-Fi 和安全规则将被彻底清空，密码将重置为默认 admin。确定继续？', '确认重置', true)) return;
+    try {
+      await api('/api/system/factory-reset', { method: 'POST' });
+      toast('正在擦除配置并恢复出厂设置…');
+    } catch (e) { handleErr(e); }
   };
 }
 

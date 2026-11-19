@@ -242,6 +242,10 @@ pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
 
+    // Remove persisted self-signed cert so next boot/restart generates one with the new LAN IP SAN
+    let _ = std::fs::remove_file("/etc/routerd/cert.pem");
+    let _ = std::fs::remove_file("/etc/routerd/key.pem");
+
     schedule_reload(&["network", "dnsmasq"]);
     Ok(ok(json!({
         "applied": true,
@@ -312,6 +316,187 @@ pub async fn pppoe_log(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(ok(json!({ "log": log })))
+}
+
+
+pub async fn get_mode() -> ApiResult<Json<Value>> {
+    let mode = tokio::task::spawn_blocking(|| {
+        let cfg = uci::load("network").unwrap_or_default();
+        let wan_proto = cfg
+            .section("wan")
+            .and_then(|s| s.get("proto"))
+            .unwrap_or("dhcp");
+        let lan_proto = cfg
+            .section("lan")
+            .and_then(|s| s.get("proto"))
+            .unwrap_or("static");
+        if wan_proto == "none" && lan_proto == "dhcp" {
+            "ap"
+        } else {
+            "router"
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(ok(json!({ "mode": mode })))
+}
+
+pub async fn set_mode(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let mode = body
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if mode != "router" && mode != "ap" {
+        return Err(ApiError::bad("模式必须是 router（路由模式）或 ap（无线中继模式）"));
+    }
+
+    let mode_owned = mode.to_string();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if mode_owned == "ap" {
+            // AP mode: WAN disabled, LAN gets DHCP from upstream main router, local DHCP server disabled
+            uci::apply(
+                "network",
+                &[
+                    ("wan".into(), "proto".into(), Some("none".into())),
+                    ("wan".into(), "disabled".into(), Some("1".into())),
+                    ("lan".into(), "proto".into(), Some("dhcp".into())),
+                    ("lan".into(), "ipaddr".into(), None),
+                    ("lan".into(), "netmask".into(), None),
+                ],
+            )?;
+            uci::apply(
+                "dhcp",
+                &[("lan".into(), "ignore".into(), Some("1".into()))],
+            )?;
+        } else {
+            // Router mode: WAN DHCP, LAN static 192.168.1.1, local DHCP enabled
+            uci::apply(
+                "network",
+                &[
+                    ("wan".into(), "proto".into(), Some("dhcp".into())),
+                    ("wan".into(), "disabled".into(), Some("0".into())),
+                    ("lan".into(), "proto".into(), Some("static".into())),
+                    ("lan".into(), "ipaddr".into(), Some("192.168.1.1".into())),
+                    ("lan".into(), "netmask".into(), Some("255.255.255.0".into())),
+                ],
+            )?;
+            uci::apply(
+                "dhcp",
+                &[("lan".into(), "ignore".into(), Some("0".into()))],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+
+    schedule_reload(&["network", "dnsmasq", "firewall"]);
+    Ok(ok(json!({ "applied": true, "mode": mode })))
+}
+
+pub async fn swap_ports(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Err(ApiError::Forbidden("演示模式禁止修改物理网口绑定".into()));
+    }
+    let new_wan = tokio::task::spawn_blocking(|| -> anyhow::Result<String> {
+        let cfg = uci::load("network")?;
+        let cur_wan = cfg
+            .section("wan")
+            .and_then(|s| s.get("device"))
+            .unwrap_or("eth1")
+            .to_string();
+        let (next_wan, next_lan_port) = if cur_wan == "eth1" {
+            ("eth0", "eth1")
+        } else {
+            ("eth1", "eth0")
+        };
+
+        uci::set_opt("network", "wan", "device", next_wan)?;
+        if let Some(br) = cfg.by_kind("device").find(|s| s.get("name") == Some("br-lan")) {
+            let sec = br.name.clone();
+            let _ = uci::delete(&format!("network.{sec}.ports"));
+            util::run(
+                uci::bin(),
+                &["add_list", &format!("network.{sec}.ports={next_lan_port}")],
+            )?;
+        }
+        uci::commit("network")?;
+        Ok(next_wan.to_string())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+
+    schedule_reload(&["network", "firewall"]);
+    Ok(ok(json!({ "swapped": true, "wan_device": new_wan })))
+}
+
+#[derive(Deserialize)]
+pub struct DiagRequest {
+    tool: String,
+    host: String,
+}
+
+pub async fn diag(
+    State(state): State<AppState>,
+    Json(req): Json<DiagRequest>,
+) -> ApiResult<Json<Value>> {
+    let host = req.host.trim();
+    if host.is_empty()
+        || host.len() > 128
+        || host.starts_with('-')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+    {
+        return Err(ApiError::bad("目标主机名或 IP 格式无效"));
+    }
+    let tool = req.tool.trim().to_string();
+    if !matches!(tool.as_str(), "ping" | "traceroute" | "nslookup") {
+        return Err(ApiError::bad("仅支持 ping / traceroute / nslookup 诊断工具"));
+    }
+    if state.sim {
+        return Ok(ok(json!({
+            "output": format!("[sim] {tool} {host}\n64 bytes from {host}: seq=0 ttl=56 time=11.4 ms\n64 bytes from {host}: seq=1 ttl=56 time=11.2 ms\n--- {host} statistics --- 0% packet loss")
+        })));
+    }
+    let host_owned = host.to_string();
+    let output = tokio::task::spawn_blocking(move || -> String {
+        let res = match tool.as_str() {
+            "ping" => std::process::Command::new("ping")
+                .args(["-c", "4", "-W", "2", &host_owned])
+                .output(),
+            "traceroute" => std::process::Command::new("traceroute")
+                .args(["-n", "-w", "2", "-m", "15", &host_owned])
+                .output(),
+            "nslookup" => std::process::Command::new("nslookup")
+                .args([&host_owned])
+                .output(),
+            _ => unreachable!(),
+        };
+        match res {
+            Ok(o) => {
+                let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(err.trim());
+                }
+                if text.trim().is_empty() {
+                    "命令执行完成，无输出".into()
+                } else {
+                    text
+                }
+            }
+            Err(e) => format!("执行失败: {e}"),
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(ok(json!({ "output": output })))
 }
 
 #[cfg(test)]
