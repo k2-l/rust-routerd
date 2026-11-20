@@ -389,4 +389,31 @@ mod tests {
         assert_eq!(router.match_outbound(&mk_dom("unknown.org", 8443)), "alt-proxy");
         assert_eq!(router.match_outbound(&mk_dom("unknown.org", 443)), "proxy");
     }
+
+    #[test]
+    fn default_builtin_rules_compile_and_route() {
+        let mut cfg = crate::singbox::config::SingboxConfig::default();
+        cfg.route.final_outbound = "proxy".into();
+        let router = Router::compile(&cfg.route).unwrap();
+
+        let mk_dom = |dom: &str| RouteContext {
+            network: RouteNetwork::Tcp,
+            target_addr: TargetAddr::Domain(dom.into()),
+            target_port: 443,
+            src_ip: None,
+        };
+        let mk_ip = |ip: IpAddr| RouteContext {
+            network: RouteNetwork::Tcp,
+            target_addr: TargetAddr::Ip(ip),
+            target_port: 443,
+            src_ip: None,
+        };
+
+        assert_eq!(router.match_outbound(&mk_ip("100.64.0.1".parse().unwrap())), "direct");
+        assert_eq!(router.match_outbound(&mk_dom("www.baidu.com")), "direct");
+        assert_eq!(router.match_outbound(&mk_dom("api.bilibili.com")), "direct");
+        assert_eq!(router.match_outbound(&mk_dom("www.tsinghua.edu.cn")), "direct");
+        assert_eq!(router.match_outbound(&mk_dom("pagead2.googlesyndication.com")), "block");
+        assert_eq!(router.match_outbound(&mk_dom("www.google.com")), "proxy");
+    }
 }

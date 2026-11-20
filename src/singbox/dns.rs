@@ -316,7 +316,12 @@ pub async fn handle_dns_packet(
         }
     }
 
-    forward_proxy_dns(pkt, &dns_ctx.proxy_outbound, dns_ctx.proxy_upstream, core).await
+    let dns_outbound = if matched_kind != "direct" && matched_kind != "block" && core.outbound_kind(matched_ob).is_some() {
+        matched_ob
+    } else {
+        &dns_ctx.proxy_outbound
+    };
+    forward_proxy_dns(pkt, dns_outbound, dns_ctx.proxy_upstream, core).await
 }
 
 async fn forward_direct_dns(pkt: &[u8], upstream: SocketAddr, fwmark: u32) -> Result<Vec<u8>> {

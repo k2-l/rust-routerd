@@ -21,7 +21,7 @@ if ! grep -Eq '25\.12' "$IB/include/version.mk" "$IB/.config" "$IB/repositories"
 fi
 
 REMOVE="-luci-light -luci-app-package-manager -luci-compat -luci-lib-base -luci-lib-apk -luci-i18n-base-zh-cn -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua -odhcp6c -odhcpd-ipv6only"
-ADD="libopenssl3 ip-tiny rpcd rpcd-mod-iwinfo conntrack"
+ADD="libopenssl3 ip-tiny rpcd rpcd-mod-iwinfo conntrack kmod-nft-tproxy"
 
 mkdir -p "$OUT"
 cd "$IB"

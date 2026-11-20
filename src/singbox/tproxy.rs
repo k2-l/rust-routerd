@@ -352,6 +352,8 @@ pub fn sync_fw4(cfg: &SingboxConfig, data_dir: &str, sim: bool) -> Result<()> {
     ensure_fw4_include(&nft_path)?;
     ensure_policy_route(cfg.route_table)?;
     util::run("/etc/init.d/firewall", &["reload"])?;
+    util::run("nft", &["list", "chain", "inet", "fw4", "routerd_tproxy_prerouting"])
+        .context("routerd_tproxy_prerouting chain not loaded by fw4 (is kmod-nft-tproxy installed?)")?;
     Ok(())
 }
 

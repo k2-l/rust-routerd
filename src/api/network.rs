@@ -182,20 +182,48 @@ pub async fn update_wan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     Ok(ok(json!({"applied": true, "proto": proto})))
 }
 
+fn parse_ip_and_optional_mask(ip_input: &str, mask_input: &str) -> Option<(String, String)> {
+    let raw_ip = ip_input.trim();
+    let raw_mask = mask_input.trim();
+    if let Some((ip_part, prefix_str)) = raw_ip.split_once('/') {
+        let ip = ip_part.trim();
+        if !valid_ip(ip) {
+            return None;
+        }
+        let prefix: u32 = prefix_str.trim().parse().ok()?;
+        if prefix == 0 || prefix > 32 {
+            return None;
+        }
+        let derived_mask = Ipv4Addr::from(u32::MAX << (32 - prefix)).to_string();
+        let final_mask = if raw_mask.is_empty() {
+            derived_mask
+        } else if valid_mask(raw_mask) {
+            raw_mask.to_string()
+        } else {
+            return None;
+        };
+        Some((ip.to_string(), final_mask))
+    } else if valid_ip(raw_ip) && valid_mask(raw_mask) {
+        Some((raw_ip.to_string(), raw_mask.to_string()))
+    } else {
+        None
+    }
+}
+
 pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
-    let ipaddr = body
+    let raw_ip = body
         .get("ipaddr")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let netmask = body
+    let raw_mask = body
         .get("netmask")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    if !valid_ip(ipaddr) || !valid_mask(netmask) {
+    let Some((ipaddr, netmask)) = parse_ip_and_optional_mask(raw_ip, raw_mask) else {
         return Err(ApiError::bad("LAN IP 地址或子网掩码无效"));
-    }
+    };
     let start = body
         .get("dhcp_start")
         .and_then(|v| v.as_u64())
@@ -221,8 +249,8 @@ pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
 
     let net_changes = vec![
         ("lan".to_string(), "proto".into(), Some("static".into())),
-        ("lan".to_string(), "ipaddr".into(), Some(ipaddr.into())),
-        ("lan".to_string(), "netmask".into(), Some(netmask.into())),
+        ("lan".to_string(), "ipaddr".into(), Some(ipaddr.clone())),
+        ("lan".to_string(), "netmask".into(), Some(netmask)),
     ];
     let dhcp_changes = vec![
         ("lan".to_string(), "start".into(), Some(start.to_string())),
@@ -518,5 +546,23 @@ mod tests {
         assert!(!valid_mask("255.0.255.0"));
         assert!(!valid_mask("255.255.255.1"));
         assert!(!valid_mask("nope"));
+    }
+
+    #[test]
+    fn cidr_ip_and_mask_parsing() {
+        assert_eq!(
+            parse_ip_and_optional_mask("10.2.2.1/24", "255.255.255.0"),
+            Some(("10.2.2.1".into(), "255.255.255.0".into()))
+        );
+        assert_eq!(
+            parse_ip_and_optional_mask("10.2.2.1/24", ""),
+            Some(("10.2.2.1".into(), "255.255.255.0".into()))
+        );
+        assert_eq!(
+            parse_ip_and_optional_mask("10.2.2.1", "255.255.255.0"),
+            Some(("10.2.2.1".into(), "255.255.255.0".into()))
+        );
+        assert_eq!(parse_ip_and_optional_mask("10.2.2.1/33", "255.255.255.0"), None);
+        assert_eq!(parse_ip_and_optional_mask("10.2.2.1/24", "bad"), None);
     }
 }

@@ -5,10 +5,10 @@ use anyhow::{bail, Result};
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 
-use crate::singbox::config::TlsConfig;
+use crate::singbox::config::{TlsConfig, TransportConfig};
 use crate::singbox::crypto;
 use crate::singbox::outbound::tls::OutboundTlsConnector;
-use crate::singbox::outbound::{BoxStream, BoxUdpSocket, DialFuture, Outbound, ProxyUdpSocket, UdpDialFuture};
+use crate::singbox::outbound::{ws, BoxStream, BoxUdpSocket, DialFuture, Outbound, ProxyUdpSocket, UdpDialFuture};
 use crate::singbox::router::{format_socks_target, RouteContext, TargetAddr};
 
 pub struct TrojanOutbound {
@@ -17,6 +17,7 @@ pub struct TrojanOutbound {
     server_port: u16,
     password_hash: String,
     tls_connector: OutboundTlsConnector,
+    transport: TransportConfig,
     fwmark: u32,
 }
 
@@ -27,6 +28,7 @@ impl TrojanOutbound {
         server_port: u16,
         password: &str,
         mut tls: TlsConfig,
+        transport: TransportConfig,
         fwmark: u32,
     ) -> Result<Self> {
         if !tls.enabled {
@@ -40,6 +42,7 @@ impl TrojanOutbound {
             server_port,
             password_hash,
             tls_connector,
+            transport,
             fwmark,
         })
     }
@@ -63,10 +66,11 @@ impl Outbound for TrojanOutbound {
 
     fn dial_tcp<'a>(&'a self, ctx: &'a RouteContext) -> DialFuture<'a> {
         Box::pin(async move {
-            let mut stream: BoxStream = self
+            let base: BoxStream = self
                 .tls_connector
                 .connect(&self.server, self.server_port, self.fwmark)
                 .await?;
+            let mut stream = ws::maybe_wrap_ws(base, &self.server, &self.transport).await?;
 
             // Trojan TCP request: hex(sha224(password)) + CRLF + CMD(0x01) + ATYP + ADDR + PORT + CRLF
             let req = self.build_request(0x01, &ctx.target_addr, ctx.target_port);
@@ -289,6 +293,7 @@ mod tests {
             port,
             "trojan-secret",
             tls_cfg,
+            TransportConfig::default(),
             0x100,
         )
         .unwrap();

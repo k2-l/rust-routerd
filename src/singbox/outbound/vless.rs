@@ -9,10 +9,10 @@ use rand::Rng;
 use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::Mutex;
 
-use crate::singbox::config::{parse_uuid, TlsConfig};
+use crate::singbox::config::{parse_uuid, TlsConfig, TransportConfig};
 use crate::singbox::outbound::reality;
 use crate::singbox::outbound::tls::OutboundTlsConnector;
-use crate::singbox::outbound::{BoxStream, BoxUdpSocket, DialFuture, Outbound, ProxyUdpSocket, UdpDialFuture};
+use crate::singbox::outbound::{ws, BoxStream, BoxUdpSocket, DialFuture, Outbound, ProxyUdpSocket, UdpDialFuture};
 use crate::singbox::router::{RouteContext, TargetAddr};
 
 const VISION_FLOW: &str = "xtls-rprx-vision";
@@ -28,10 +28,12 @@ pub struct VlessOutbound {
     flow: Option<String>,
     tls: TlsConfig,
     tls_connector: OutboundTlsConnector,
+    transport: TransportConfig,
     fwmark: u32,
 }
 
 impl VlessOutbound {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tag: String,
         server: String,
@@ -39,6 +41,7 @@ impl VlessOutbound {
         uuid_str: &str,
         flow: Option<String>,
         tls: TlsConfig,
+        transport: TransportConfig,
         fwmark: u32,
     ) -> Result<Self> {
         let uuid = parse_uuid(uuid_str)?;
@@ -51,6 +54,7 @@ impl VlessOutbound {
             flow,
             tls,
             tls_connector,
+            transport,
             fwmark,
         })
     }
@@ -68,9 +72,11 @@ impl VlessOutbound {
                 .await;
             }
         }
-        self.tls_connector
+        let base = self
+            .tls_connector
             .connect(&self.server, self.server_port, self.fwmark)
-            .await
+            .await?;
+        ws::maybe_wrap_ws(base, &self.server, &self.transport).await
     }
 
     fn encode_request(&self, cmd: u8, target: &TargetAddr, port: u16, flow: Option<&str>) -> Vec<u8> {
@@ -484,6 +490,7 @@ mod tests {
             "11111111-2222-3333-4444-555555555555",
             Some("xtls-rprx-vision".into()),
             tls,
+            TransportConfig::default(),
             0x100,
         )
         .unwrap();
@@ -581,6 +588,7 @@ mod tests {
             uuid_str,
             None,
             TlsConfig::default(),
+            TransportConfig::default(),
             0x100,
         )
         .unwrap();

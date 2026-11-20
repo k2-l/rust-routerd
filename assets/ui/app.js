@@ -990,6 +990,7 @@ async function renderSingbox() {
   };
 
   const ruleRows = rules.map((r, idx) => `<tr>
+    <td><b>${esc(r.name || `规则 #${idx + 1}`)}</b></td>
     <td class="mono tiny">${esc(ruleSummary(r))}</td>
     <td><span class="badge">${esc(r.outbound)}</span></td>
     <td class="right"><button class="btn btn-sm btn-danger" data-sb-del-rule="${idx}">${icon('trash')}</button></td>
@@ -1051,11 +1052,14 @@ async function renderSingbox() {
       <div class="card">
         <div class="row-between">
           <div><h2 style="margin:0;font-size:15px">分流规则</h2></div>
-          <button class="btn btn-sm btn-primary" id="sb-add-rule">${icon('plus')}添加规则</button>
+          <div class="row gap-8">
+            <button class="btn btn-sm" id="sb-reset-rules">恢复内置规则</button>
+            <button class="btn btn-sm btn-primary" id="sb-add-rule">${icon('plus')}添加规则</button>
+          </div>
         </div>
         <div class="table-wrap mt-14"><table>
-          <thead><tr><th>匹配条件</th><th>目标出站</th><th class="right">删除</th></tr></thead>
-          <tbody>${ruleRows || '<tr><td colspan="3" class="empty">暂无自定义规则</td></tr>'}</tbody>
+          <thead><tr><th>规则名称</th><th>匹配条件</th><th>目标出站</th><th class="right">删除</th></tr></thead>
+          <tbody>${ruleRows || '<tr><td colspan="4" class="empty">暂无自定义规则</td></tr>'}</tbody>
         </table></div>
       </div>
 
@@ -1204,6 +1208,18 @@ async function renderSingbox() {
     };
   });
 
+  $('#sb-reset-rules').onclick = async () => {
+    const next = structuredClone(cfg);
+    next.route.rules = [
+      { name: '私网与保留网段直连', ip_cidr: ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16', '100.64.0.0/10', '224.0.0.0/4', 'fe80::/10', 'fc00::/7', '::1/128'], outbound: 'direct' },
+      { name: '本地域名直连', domain_suffix: ['local', 'lan', 'arpa', 'home.arpa', 'localhost'], outbound: 'direct' },
+      { name: 'NTP 校时直连', network: ['udp'], port: [123], outbound: 'direct' },
+      { name: '国内常用域名直连', domain_suffix: ['cn', 'baidu.com', 'bdstatic.com', 'qq.com', 'wechat.com', 'taobao.com', 'tmall.com', 'alicdn.com', 'aliyun.com', 'alipay.com', 'jd.com', '360buyimg.com', 'bilibili.com', 'hdslb.com', '163.com', '126.com', 'netease.com', 'zhihu.com', 'douyin.com', 'bytedance.com', 'toutiao.com', 'weibo.com', 'xiaomi.com', 'mi.com', 'huawei.com', 'meituan.com', 'ctrip.com', 'apple.com', 'icloud.com', 'msn.cn', 'bing.com'], outbound: 'direct' },
+      { name: '常见广告与遥测拦截', domain_suffix: ['doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'app-measurement.com'], outbound: 'block' },
+    ];
+    try { await saveConfig(next, '已恢复内置默认分流规则'); } catch (e) { handleErr(e); }
+  };
+
   $$('[data-sb-dev-mac]').forEach((sel) => {
     sel.onchange = async () => {
       try {
@@ -1250,8 +1266,11 @@ async function renderSingbox() {
          <label class="field"><span>节点标签</span><input name="tag" placeholder="hk-1" required></label>
          <label class="field"><span>协议类型</span><select name="type" id="sb-ob-type">
            <option value="vless">VLESS</option>
+           <option value="vmess">VMess</option>
            <option value="trojan">Trojan</option>
            <option value="shadowsocks">Shadowsocks</option>
+           <option value="socks">SOCKS5</option>
+           <option value="http">HTTP</option>
          </select></label>
        </div>
        <div class="field-row">
@@ -1286,9 +1305,20 @@ async function renderSingbox() {
            <label class="field"><span>跳过证书校验 (insecure)</span><select name="insecure"><option value="0">否 (推荐)</option><option value="1">是</option></select></label>
          </div>
          <label class="field"><span>SNI (server_name)</span><input name="sni" placeholder="example.com"></label>
-         <div class="field-row">
+         <div class="field-row" id="sb-ws-fields">
+           <label class="field"><span>传输层</span><select name="transport_type"><option value="tcp">TCP</option><option value="ws">WebSocket (ws)</option></select></label>
+           <label class="field"><span>WS Path</span><input name="ws_path" placeholder="/ws"></label>
+           <label class="field"><span>WS Host</span><input name="ws_host" placeholder="可选"></label>
+         </div>
+         <div class="field-row" id="sb-reality-fields">
            <label class="field"><span>Reality Public Key (可选)</span><input name="reality_pk" placeholder="留空则使用普通 TLS"></label>
            <label class="field"><span>Reality Short ID</span><input name="reality_sid" placeholder="可选"></label>
+         </div>
+       </div>
+       <div id="sb-userpass-fields" class="hidden">
+         <div class="field-row">
+           <label class="field"><span>用户名 (可选)</span><input name="proxy_user"></label>
+           <label class="field"><span>密码 (可选)</span><input name="proxy_pass"></label>
          </div>
        </div>
        <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">添加</button></div>
@@ -1298,11 +1328,15 @@ async function renderSingbox() {
         const typeSel = el.querySelector('#sb-ob-type');
         const syncFields = () => {
           const t = typeSel.value;
+          const isAuthProxy = t === 'socks' || t === 'http';
           el.querySelector('#sb-ss-fields').classList.toggle('hidden', t !== 'shadowsocks');
-          el.querySelector('#sb-cred-field').classList.toggle('hidden', t === 'shadowsocks');
+          el.querySelector('#sb-cred-field').classList.toggle('hidden', t === 'shadowsocks' || isAuthProxy);
           el.querySelector('#sb-flow-field').classList.toggle('hidden', t !== 'vless');
-          el.querySelector('#sb-tls-fields').classList.toggle('hidden', t === 'shadowsocks');
-          el.querySelector('#sb-cred-label').textContent = t === 'vless' ? 'UUID' : 'Trojan 密码';
+          el.querySelector('#sb-tls-fields').classList.toggle('hidden', t === 'shadowsocks' || t === 'socks');
+          el.querySelector('#sb-ws-fields').classList.toggle('hidden', isAuthProxy || t === 'shadowsocks');
+          el.querySelector('#sb-reality-fields').classList.toggle('hidden', t !== 'vless');
+          el.querySelector('#sb-userpass-fields').classList.toggle('hidden', !isAuthProxy);
+          el.querySelector('#sb-cred-label').textContent = (t === 'vless' || t === 'vmess') ? 'UUID' : 'Trojan 密码';
         };
         typeSel.onchange = syncFields;
         syncFields();
@@ -1321,6 +1355,24 @@ async function renderSingbox() {
               method: f.get('method'),
               password: f.get('ss_password'),
             };
+          } else if (t === 'socks' || t === 'http') {
+            ob = {
+              type: t,
+              tag: f.get('tag').trim(),
+              server: f.get('server').trim(),
+              server_port: Number(f.get('server_port')),
+              username: f.get('proxy_user').trim() || null,
+              password: f.get('proxy_pass') || null,
+            };
+            if (t === 'http') {
+              ob.tls = {
+                enabled: f.get('tls_enabled') === '1',
+                server_name: f.get('sni').trim() || null,
+                insecure: f.get('insecure') === '1',
+                alpn: [],
+                reality: null,
+              };
+            }
           } else {
             const pk = f.get('reality_pk').trim();
             const tls = {
@@ -1330,9 +1382,18 @@ async function renderSingbox() {
               alpn: [],
               reality: pk ? { enabled: true, public_key: pk, short_id: f.get('reality_sid').trim() } : null,
             };
-            ob = t === 'vless'
-              ? { type: 'vless', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), flow: f.get('flow') || '', tls }
-              : { type: 'trojan', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), password: f.get('cred'), tls };
+            const transport = {
+              type: f.get('transport_type') || 'tcp',
+              path: f.get('ws_path').trim() || null,
+              host: f.get('ws_host').trim() || null,
+            };
+            if (t === 'vless') {
+              ob = { type: 'vless', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), flow: f.get('flow') || '', tls, transport };
+            } else if (t === 'vmess') {
+              ob = { type: 'vmess', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), security: 'auto', tls, transport };
+            } else {
+              ob = { type: 'trojan', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), password: f.get('cred'), tls, transport };
+            }
           }
           const next = structuredClone(cfg);
           next.outbounds.push(ob);
@@ -1345,7 +1406,10 @@ async function renderSingbox() {
   $('#sb-add-rule').onclick = () => openModal(
     `<h3>添加分流规则</h3>
      <form id="sb-rule-f">
-       <label class="field"><span>目标出站</span><select name="outbound">${outbounds.map((ob) => `<option value="${esc(ob.tag)}">${esc(ob.tag)}</option>`).join('')}</select></label>
+       <div class="field-row">
+         <label class="field"><span>规则名称</span><input name="name" placeholder="例如：国内直连 / AI 代理" required></label>
+         <label class="field"><span>目标出站</span><select name="outbound">${outbounds.map((ob) => `<option value="${esc(ob.tag)}">${esc(ob.tag)}</option>`).join('')}</select></label>
+       </div>
        <label class="field"><span>域名后缀 (逗号分隔)</span><input name="domain_suffix" placeholder="cn, baidu.com"></label>
        <label class="field"><span>目标 IP CIDR (逗号分隔)</span><input name="ip_cidr" placeholder="192.168.0.0/16, 10.0.0.0/8"></label>
        <div class="field-row">
@@ -1363,6 +1427,7 @@ async function renderSingbox() {
           e.preventDefault();
           const f = new FormData(e.target);
           const rule = {
+            name: f.get('name').trim(),
             ip_cidr: splitCsv(f.get('ip_cidr')),
             src_ip_cidr: splitCsv(f.get('src_ip_cidr')),
             domain_suffix: splitCsv(f.get('domain_suffix')),

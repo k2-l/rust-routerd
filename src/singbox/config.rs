@@ -58,7 +58,23 @@ impl Default for DnsConfig {
             direct_upstream: "223.5.5.5:53".to_string(),
             proxy_upstream: "8.8.8.8:53".to_string(),
             proxy_outbound: "proxy".to_string(),
-            direct_domains: vec!["cn".into(), "local".into(), "lan".into()],
+            direct_domains: vec![
+                "cn".into(),
+                "local".into(),
+                "lan".into(),
+                "arpa".into(),
+                "baidu.com".into(),
+                "qq.com".into(),
+                "taobao.com".into(),
+                "alicdn.com".into(),
+                "aliyun.com".into(),
+                "bilibili.com".into(),
+                "jd.com".into(),
+                "163.com".into(),
+                "xiaomi.com".into(),
+                "apple.com".into(),
+                "icloud.com".into(),
+            ],
             fakeip: FakeIpConfig::default(),
             link_dnsmasq: false,
         }
@@ -180,6 +196,15 @@ pub struct RealityConfig {
     pub short_id: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransportConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub path: Option<String>,
+    pub host: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum OutboundConfig {
@@ -203,6 +228,8 @@ pub enum OutboundConfig {
         password: String,
         #[serde(default)]
         tls: TlsConfig,
+        #[serde(default)]
+        transport: TransportConfig,
     },
     Vless {
         tag: String,
@@ -213,7 +240,45 @@ pub enum OutboundConfig {
         flow: Option<String>,
         #[serde(default)]
         tls: TlsConfig,
+        #[serde(default)]
+        transport: TransportConfig,
     },
+    Vmess {
+        tag: String,
+        server: String,
+        server_port: u16,
+        uuid: String,
+        #[serde(default = "default_vmess_security")]
+        security: String,
+        #[serde(default)]
+        tls: TlsConfig,
+        #[serde(default)]
+        transport: TransportConfig,
+    },
+    Socks {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+    },
+    Http {
+        tag: String,
+        server: String,
+        server_port: u16,
+        #[serde(default)]
+        username: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        tls: TlsConfig,
+    },
+}
+
+fn default_vmess_security() -> String {
+    "auto".to_string()
 }
 
 impl OutboundConfig {
@@ -223,7 +288,10 @@ impl OutboundConfig {
             | Self::Block { tag }
             | Self::Shadowsocks { tag, .. }
             | Self::Trojan { tag, .. }
-            | Self::Vless { tag, .. } => tag,
+            | Self::Vless { tag, .. }
+            | Self::Vmess { tag, .. }
+            | Self::Socks { tag, .. }
+            | Self::Http { tag, .. } => tag,
         }
     }
 
@@ -234,6 +302,9 @@ impl OutboundConfig {
             Self::Shadowsocks { .. } => "shadowsocks",
             Self::Trojan { .. } => "trojan",
             Self::Vless { .. } => "vless",
+            Self::Vmess { .. } => "vmess",
+            Self::Socks { .. } => "socks",
+            Self::Http { .. } => "http",
         }
     }
 }
@@ -249,30 +320,106 @@ pub struct RouteConfig {
 impl Default for RouteConfig {
     fn default() -> Self {
         Self {
-            rules: vec![RouteRule {
-                ip_cidr: vec![
-                    "10.0.0.0/8".into(),
-                    "172.16.0.0/12".into(),
-                    "192.168.0.0/16".into(),
-                    "127.0.0.0/8".into(),
-                ],
-                src_ip_cidr: Vec::new(),
-                src_mac: Vec::new(),
-                domain_suffix: vec!["local".into(), "lan".into()],
-                domain_exact: Vec::new(),
-                domain_keyword: Vec::new(),
-                port: Vec::new(),
-                network: Vec::new(),
-                outbound: "direct".into(),
-            }],
+            rules: default_route_rules(),
             final_outbound: "direct".into(),
         }
     }
 }
 
+pub fn default_route_rules() -> Vec<RouteRule> {
+    vec![
+        RouteRule {
+            name: "私网与保留网段直连".into(),
+            ip_cidr: vec![
+                "10.0.0.0/8".into(),
+                "172.16.0.0/12".into(),
+                "192.168.0.0/16".into(),
+                "127.0.0.0/8".into(),
+                "169.254.0.0/16".into(),
+                "100.64.0.0/10".into(),
+                "224.0.0.0/4".into(),
+                "fe80::/10".into(),
+                "fc00::/7".into(),
+                "::1/128".into(),
+            ],
+            outbound: "direct".into(),
+            ..Default::default()
+        },
+        RouteRule {
+            name: "本地域名直连".into(),
+            domain_suffix: vec![
+                "local".into(),
+                "lan".into(),
+                "arpa".into(),
+                "home.arpa".into(),
+                "localhost".into(),
+            ],
+            outbound: "direct".into(),
+            ..Default::default()
+        },
+        RouteRule {
+            name: "NTP 校时直连".into(),
+            network: vec!["udp".into()],
+            port: vec![123],
+            outbound: "direct".into(),
+            ..Default::default()
+        },
+        RouteRule {
+            name: "国内常用域名直连".into(),
+            domain_suffix: vec![
+                "cn".into(),
+                "baidu.com".into(),
+                "bdstatic.com".into(),
+                "qq.com".into(),
+                "wechat.com".into(),
+                "taobao.com".into(),
+                "tmall.com".into(),
+                "alicdn.com".into(),
+                "aliyun.com".into(),
+                "alipay.com".into(),
+                "jd.com".into(),
+                "360buyimg.com".into(),
+                "bilibili.com".into(),
+                "hdslb.com".into(),
+                "163.com".into(),
+                "126.com".into(),
+                "netease.com".into(),
+                "zhihu.com".into(),
+                "douyin.com".into(),
+                "bytedance.com".into(),
+                "toutiao.com".into(),
+                "weibo.com".into(),
+                "xiaomi.com".into(),
+                "mi.com".into(),
+                "huawei.com".into(),
+                "meituan.com".into(),
+                "ctrip.com".into(),
+                "apple.com".into(),
+                "icloud.com".into(),
+                "msn.cn".into(),
+                "bing.com".into(),
+            ],
+            outbound: "direct".into(),
+            ..Default::default()
+        },
+        RouteRule {
+            name: "常见广告与遥测拦截".into(),
+            domain_suffix: vec![
+                "doubleclick.net".into(),
+                "googlesyndication.com".into(),
+                "googleadservices.com".into(),
+                "app-measurement.com".into(),
+            ],
+            outbound: "block".into(),
+            ..Default::default()
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RouteRule {
+    pub name: String,
     pub ip_cidr: Vec<String>,
     pub src_ip_cidr: Vec<String>,
     pub src_mac: Vec<String>,
@@ -369,6 +516,31 @@ impl SingboxConfig {
                         bail!("vless outbound {} requires server and port", ob.tag());
                     }
                     parse_uuid(uuid).with_context(|| format!("invalid vless uuid in {}", ob.tag()))?;
+                }
+                OutboundConfig::Vmess {
+                    server,
+                    server_port,
+                    uuid,
+                    ..
+                } => {
+                    if server.trim().is_empty() || *server_port == 0 {
+                        bail!("vmess outbound {} requires server and port", ob.tag());
+                    }
+                    parse_uuid(uuid).with_context(|| format!("invalid vmess uuid in {}", ob.tag()))?;
+                }
+                OutboundConfig::Socks {
+                    server,
+                    server_port,
+                    ..
+                }
+                | OutboundConfig::Http {
+                    server,
+                    server_port,
+                    ..
+                } => {
+                    if server.trim().is_empty() || *server_port == 0 {
+                        bail!("outbound {} requires valid server and port", ob.tag());
+                    }
                 }
                 OutboundConfig::Direct { .. } | OutboundConfig::Block { .. } => {}
             }

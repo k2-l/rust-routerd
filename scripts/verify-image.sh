@@ -52,7 +52,7 @@ check "apk database present" "[ -f '$R/lib/apk/db/installed' ]"
 
 echo
 echo "== required runtime packages (ImmortalWrt 25.12 apk) =="
-for p in apk-mbedtls libopenssl3 rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
+for p in apk-mbedtls libopenssl3 rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack kmod-nft-tproxy; do
 	check "package $p" "grep -q '^P:$p\$' '$R/lib/apk/db/installed'"
 done
 

@@ -183,6 +183,7 @@ pub async fn set_device_policy(
         cfg.route.rules.insert(
             0,
             RouteRule {
+                name: format!("终端策略 ({norm})"),
                 src_mac: vec![norm.clone()],
                 outbound: ob.to_string(),
                 ..Default::default()

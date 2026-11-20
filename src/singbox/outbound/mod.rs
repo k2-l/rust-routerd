@@ -1,8 +1,11 @@
 pub mod reality;
 pub mod shadowsocks;
+pub mod socks_http;
 pub mod tls;
 pub mod trojan;
 pub mod vless;
+pub mod vmess;
+pub mod ws;
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -172,12 +175,14 @@ pub fn build_outbound(cfg: &OutboundConfig, fwmark: u32) -> Result<Arc<dyn Outbo
             server_port,
             password,
             tls,
+            transport,
         } => Ok(Arc::new(trojan::TrojanOutbound::new(
             tag.clone(),
             server.clone(),
             *server_port,
             password,
             tls.clone(),
+            transport.clone(),
             fwmark,
         )?)),
         OutboundConfig::Vless {
@@ -187,12 +192,62 @@ pub fn build_outbound(cfg: &OutboundConfig, fwmark: u32) -> Result<Arc<dyn Outbo
             uuid,
             flow,
             tls,
+            transport,
         } => Ok(Arc::new(vless::VlessOutbound::new(
             tag.clone(),
             server.clone(),
             *server_port,
             uuid,
             flow.clone(),
+            tls.clone(),
+            transport.clone(),
+            fwmark,
+        )?)),
+        OutboundConfig::Vmess {
+            tag,
+            server,
+            server_port,
+            uuid,
+            security,
+            tls,
+            transport,
+        } => Ok(Arc::new(vmess::VmessOutbound::new(
+            tag.clone(),
+            server.clone(),
+            *server_port,
+            uuid,
+            security,
+            tls.clone(),
+            transport.clone(),
+            fwmark,
+        )?)),
+        OutboundConfig::Socks {
+            tag,
+            server,
+            server_port,
+            username,
+            password,
+        } => Ok(Arc::new(socks_http::SocksOutbound::new(
+            tag.clone(),
+            server.clone(),
+            *server_port,
+            username.clone(),
+            password.clone(),
+            fwmark,
+        ))),
+        OutboundConfig::Http {
+            tag,
+            server,
+            server_port,
+            username,
+            password,
+            tls,
+        } => Ok(Arc::new(socks_http::HttpOutbound::new(
+            tag.clone(),
+            server.clone(),
+            *server_port,
+            username.clone(),
+            password.clone(),
             tls.clone(),
             fwmark,
         )?)),
