@@ -339,3 +339,34 @@ pub fn apply(payload: &Value) -> anyhow::Result<()> {
 pub fn bool_str(v: bool) -> String {
     if v { "1".into() } else { "0".into() }
 }
+
+/// Disconnect a client by MAC across all active `hostapd.*` interfaces (and optionally flush conntrack/ARP).
+pub fn kick_client(mac: &str, ip: Option<&str>, ban_ms: u64) -> (bool, bool) {
+    let mut wifi_deauth = false;
+    if let Some(list) = util::run_ok("ubus", &["list", "hostapd.*"]) {
+        let payload = json!({
+            "addr": mac,
+            "reason": 5,
+            "deauth": true,
+            "ban_time": ban_ms,
+        })
+        .to_string();
+        for obj in list.lines().map(str::trim).filter(|l| l.starts_with("hostapd.")) {
+            if ubus::call_ok(obj, "del_client", Some(&payload)).is_some() {
+                wifi_deauth = true;
+            }
+        }
+    }
+
+    let mut conntrack_flushed = false;
+    if let Some(client_ip) = ip.filter(|s| !s.is_empty()) {
+        if util::run_ok("conntrack", &["-D", "-s", client_ip]).is_some() {
+            conntrack_flushed = true;
+        }
+        if util::run_ok("conntrack", &["-D", "-d", client_ip]).is_some() {
+            conntrack_flushed = true;
+        }
+        let _ = util::run_ok("ip", &["neigh", "del", client_ip, "dev", "br-lan"]);
+    }
+    (wifi_deauth, conntrack_flushed)
+}

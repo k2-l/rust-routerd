@@ -1,10 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use crate::access::devices::normalize_mac;
 use crate::state::AppState;
 
 use super::{ok, ApiError, ApiResult};
@@ -53,6 +54,33 @@ fn lan_value() -> Value {
     })
 }
 
+fn static_leases_value() -> Vec<Value> {
+    let dhcp = uci::load("dhcp").unwrap_or_default();
+    dhcp.by_kind("host")
+        .map(|h| {
+            json!({
+                "section": h.name,
+                "name": h.get_or("name", ""),
+                "mac": h.get_or("mac", ""),
+                "ip": h.get_or("ip", ""),
+            })
+        })
+        .collect()
+}
+
+fn custom_hosts_value() -> Vec<Value> {
+    let dhcp = uci::load("dhcp").unwrap_or_default();
+    dhcp.by_kind("domain")
+        .map(|d| {
+            json!({
+                "section": d.name,
+                "name": d.get_or("name", ""),
+                "ip": d.get_or("ip", ""),
+            })
+        })
+        .collect()
+}
+
 pub async fn get() -> ApiResult<Json<Value>> {
     let data = tokio::task::spawn_blocking(|| {
         json!({
@@ -63,6 +91,8 @@ pub async fn get() -> ApiResult<Json<Value>> {
             "routes": net::routes(),
             "devices": net::physical_devices(),
             "dns": net::dns_servers(),
+            "static_leases": static_leases_value(),
+            "hosts": custom_hosts_value(),
         })
     })
     .await
@@ -526,6 +556,176 @@ pub async fn diag(
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(ok(json!({ "output": output })))
+}
+
+#[derive(Deserialize)]
+pub struct StaticLeaseReq {
+    #[serde(default)]
+    name: String,
+    mac: String,
+    ip: String,
+}
+
+fn valid_host_label(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 253
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+fn validate_static_lease(req: &StaticLeaseReq) -> ApiResult<(String, String, String)> {
+    let mac = normalize_mac(req.mac.trim()).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
+    let ip = req.ip.trim().to_string();
+    if !valid_ip(&ip) {
+        return Err(ApiError::bad("IPv4 地址无效"));
+    }
+    let name = req.name.trim().to_string();
+    if !name.is_empty() && !valid_host_label(&name) {
+        return Err(ApiError::bad("主机名仅支持字母、数字、点、横线或下划线"));
+    }
+    Ok((name, mac, ip))
+}
+
+pub async fn add_static_lease(Json(req): Json<StaticLeaseReq>) -> ApiResult<Json<Value>> {
+    let (name, mac, ip) = validate_static_lease(&req)?;
+    let section = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let sec = uci::add("dhcp", "host")?;
+        let mut ops = vec![
+            (sec.clone(), "mac".into(), Some(mac)),
+            (sec.clone(), "ip".into(), Some(ip)),
+            (sec.clone(), "dns".into(), Some("1".into())),
+        ];
+        if !name.is_empty() {
+            ops.push((sec.clone(), "name".into(), Some(name)));
+        }
+        uci::apply("dhcp", &ops)?;
+        Ok(sec)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "section": section })))
+}
+
+pub async fn update_static_lease(
+    Path(section): Path<String>,
+    Json(req): Json<StaticLeaseReq>,
+) -> ApiResult<Json<Value>> {
+    if !util::valid_name(&section) {
+        return Err(ApiError::bad("无效的条目 ID"));
+    }
+    let (name, mac, ip) = validate_static_lease(&req)?;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let cfg = uci::load("dhcp")?;
+        if cfg.section(&section).is_none() {
+            anyhow::bail!("静态租约不存在");
+        }
+        uci::apply(
+            "dhcp",
+            &[
+                (section.clone(), "name".into(), if name.is_empty() { None } else { Some(name) }),
+                (section.clone(), "mac".into(), Some(mac)),
+                (section.clone(), "ip".into(), Some(ip)),
+                (section, "dns".into(), Some("1".into())),
+            ],
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "updated": true })))
+}
+
+pub async fn delete_static_lease(Path(section): Path<String>) -> ApiResult<Json<Value>> {
+    if !util::valid_name(&section) {
+        return Err(ApiError::bad("无效的条目 ID"));
+    }
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        uci::delete(&format!("dhcp.{section}"))?;
+        uci::commit("dhcp")
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "deleted": true })))
+}
+
+#[derive(Deserialize)]
+pub struct CustomHostReq {
+    name: String,
+    ip: String,
+}
+
+fn validate_custom_host(req: &CustomHostReq) -> ApiResult<(String, String)> {
+    let name = req.name.trim().to_string();
+    let ip = req.ip.trim().to_string();
+    if !valid_host_label(&name) {
+        return Err(ApiError::bad("域名格式无效"));
+    }
+    if !valid_ip(&ip) {
+        return Err(ApiError::bad("IPv4 地址无效"));
+    }
+    Ok((name, ip))
+}
+
+pub async fn add_custom_host(Json(req): Json<CustomHostReq>) -> ApiResult<Json<Value>> {
+    let (name, ip) = validate_custom_host(&req)?;
+    let section = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let sec = uci::add("dhcp", "domain")?;
+        uci::apply(
+            "dhcp",
+            &[
+                (sec.clone(), "name".into(), Some(name)),
+                (sec.clone(), "ip".into(), Some(ip)),
+            ],
+        )?;
+        Ok(sec)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "section": section })))
+}
+
+pub async fn update_custom_host(
+    Path(section): Path<String>,
+    Json(req): Json<CustomHostReq>,
+) -> ApiResult<Json<Value>> {
+    if !util::valid_name(&section) {
+        return Err(ApiError::bad("无效的条目 ID"));
+    }
+    let (name, ip) = validate_custom_host(&req)?;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let cfg = uci::load("dhcp")?;
+        if cfg.section(&section).is_none() {
+            anyhow::bail!("Hosts 记录不存在");
+        }
+        uci::apply(
+            "dhcp",
+            &[
+                (section.clone(), "name".into(), Some(name)),
+                (section, "ip".into(), Some(ip)),
+            ],
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "updated": true })))
+}
+
+pub async fn delete_custom_host(Path(section): Path<String>) -> ApiResult<Json<Value>> {
+    if !util::valid_name(&section) {
+        return Err(ApiError::bad("无效的条目 ID"));
+    }
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        uci::delete(&format!("dhcp.{section}"))?;
+        uci::commit("dhcp")
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    schedule_reload(&["dnsmasq"]);
+    Ok(ok(json!({ "deleted": true })))
 }
 
 #[cfg(test)]

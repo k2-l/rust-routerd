@@ -567,6 +567,45 @@ async function renderNetwork() {
       </form>
     </div>
 
+    <div class="grid grid-2 mt-20">
+      <div class="card">
+        <div class="row-between">
+          <div><h2 style="margin:0;font-size:15px">DHCP 静态地址分配</h2><p class="muted tiny" style="margin:4px 0 0">为指定 MAC 终端绑定固定内网 IP</p></div>
+          <button class="btn btn-sm btn-primary" id="dhcp-host-add">${icon('plus')}新增绑定</button>
+        </div>
+        <div class="table-wrap mt-14"><table>
+          <thead><tr><th>主机名</th><th>MAC 地址</th><th>固定 IP</th><th class="right">操作</th></tr></thead>
+          <tbody>${(d.static_leases || []).map((h, idx) => `<tr>
+            <td><b>${esc(h.name || '—')}</b></td>
+            <td class="mono tiny">${esc(h.mac)}</td>
+            <td class="mono">${esc(h.ip)}</td>
+            <td class="right nowrap">
+              <button class="btn btn-sm" data-host-edit="${idx}">编辑</button>
+              <button class="btn btn-sm btn-danger" data-host-del="${esc(h.section)}">${icon('trash')}</button>
+            </td>
+          </tr>`).join('') || '<tr><td colspan="4" class="empty">暂无静态租约</td></tr>'}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="row-between">
+          <div><h2 style="margin:0;font-size:15px">自定义局域网 Hosts</h2><p class="muted tiny" style="margin:4px 0 0">为内网设备或服务配置本地域名解析</p></div>
+          <button class="btn btn-sm btn-primary" id="dns-dom-add">${icon('plus')}新增解析</button>
+        </div>
+        <div class="table-wrap mt-14"><table>
+          <thead><tr><th>本地域名</th><th>解析 IP</th><th class="right">操作</th></tr></thead>
+          <tbody>${(d.hosts || []).map((h, idx) => `<tr>
+            <td class="mono"><b>${esc(h.name)}</b></td>
+            <td class="mono">${esc(h.ip)}</td>
+            <td class="right nowrap">
+              <button class="btn btn-sm" data-dom-edit="${idx}">编辑</button>
+              <button class="btn btn-sm btn-danger" data-dom-del="${esc(h.section)}">${icon('trash')}</button>
+            </td>
+          </tr>`).join('') || '<tr><td colspan="3" class="empty">暂无自定义 Hosts</td></tr>'}</tbody>
+        </table></div>
+      </div>
+    </div>
+
     <div class="card mt-20">
       <div class="card-title"><h2>网络连通性诊断</h2><span class="sub">Ping / 路由追踪 / DNS 解析</span></div>
       <form id="diag-form" class="row wrap gap-10">
@@ -666,6 +705,69 @@ async function renderNetwork() {
       toast('LAN 配置已保存');
     } catch (ex) { handleErr(ex); }
   };
+
+  const staticLeases = d.static_leases || [];
+  const customHosts = d.hosts || [];
+  const openLeaseModal = (existing) => openModal(
+    `<h3>${existing ? '编辑静态地址绑定' : '新增静态地址绑定'}</h3>
+     <form id="dhcp-host-f">
+       <label class="field"><span>主机名 (可选)</span><input name="name" value="${esc(existing ? existing.name : '')}" placeholder="例如：nas"></label>
+       <div class="field-row">
+         <label class="field"><span>MAC 地址</span><input name="mac" value="${esc(existing ? existing.mac : '')}" placeholder="AA:BB:CC:DD:EE:FF" required></label>
+         <label class="field"><span>固定 IPv4</span><input name="ip" value="${esc(existing ? existing.ip : '')}" placeholder="192.168.1.50" required></label>
+       </div>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '添加绑定'}</button></div>
+     </form>`,
+    {
+      onMount(el, close) {
+        el.querySelector('[data-cancel]').onclick = close;
+        el.querySelector('#dhcp-host-f').onsubmit = async (e) => {
+          e.preventDefault();
+          const f = new FormData(e.target);
+          const body = { name: f.get('name').trim(), mac: f.get('mac').trim(), ip: f.get('ip').trim() };
+          try {
+            if (existing) await api(`/api/network/dhcp/hosts/${encodeURIComponent(existing.section)}`, { method: 'PUT', body });
+            else await api('/api/network/dhcp/hosts', { method: 'POST', body });
+            toast(existing ? '静态绑定已更新' : '静态绑定已添加');
+            close(); go('network');
+          } catch (ex) { handleErr(ex); }
+        };
+      },
+    }
+  );
+  $('#dhcp-host-add').onclick = () => openLeaseModal(null);
+  $$('[data-host-edit]').forEach((b) => { b.onclick = () => openLeaseModal(staticLeases[Number(b.dataset.hostEdit)]); });
+  $$('[data-host-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/network/dhcp/hosts/${encodeURIComponent(b.dataset.hostDel)}`, { method: 'DELETE' }); toast('静态绑定已删除'); go('network'); } catch (ex) { handleErr(ex); } }; });
+
+  const openHostModal = (existing) => openModal(
+    `<h3>${existing ? '编辑自定义 Hosts' : '新增自定义 Hosts'}</h3>
+     <form id="dns-dom-f">
+       <div class="field-row">
+         <label class="field"><span>本地域名</span><input name="name" value="${esc(existing ? existing.name : '')}" placeholder="nas.lan" required></label>
+         <label class="field"><span>解析 IPv4</span><input name="ip" value="${esc(existing ? existing.ip : '')}" placeholder="192.168.1.50" required></label>
+       </div>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '添加解析'}</button></div>
+     </form>`,
+    {
+      onMount(el, close) {
+        el.querySelector('[data-cancel]').onclick = close;
+        el.querySelector('#dns-dom-f').onsubmit = async (e) => {
+          e.preventDefault();
+          const f = new FormData(e.target);
+          const body = { name: f.get('name').trim(), ip: f.get('ip').trim() };
+          try {
+            if (existing) await api(`/api/network/dns/domains/${encodeURIComponent(existing.section)}`, { method: 'PUT', body });
+            else await api('/api/network/dns/domains', { method: 'POST', body });
+            toast(existing ? 'Hosts 记录已更新' : 'Hosts 记录已添加');
+            close(); go('network');
+          } catch (ex) { handleErr(ex); }
+        };
+      },
+    }
+  );
+  $('#dns-dom-add').onclick = () => openHostModal(null);
+  $$('[data-dom-edit]').forEach((b) => { b.onclick = () => openHostModal(customHosts[Number(b.dataset.domEdit)]); });
+  $$('[data-dom-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/network/dns/domains/${encodeURIComponent(b.dataset.domDel)}`, { method: 'DELETE' }); toast('Hosts 记录已删除'); go('network'); } catch (ex) { handleErr(ex); } }; });
 }
 
 function encOptions(current) {
@@ -756,6 +858,9 @@ async function renderClients() {
       <td>${qosBadge}</td>
       <td class="right nowrap">
         <button class="btn btn-sm" data-qos-mac="${esc(c.mac)}" data-qos-name="${esc(c.alias || '')}" data-qos-rx="${rxLim}" data-qos-tx="${txLim}">限速 / 备注</button>
+        <button class="btn btn-sm" data-bind-mac="${esc(c.mac)}" data-bind-ip="${esc(c.ip || (lease && lease.ip) || '')}" data-bind-name="${esc(c.alias || (lease && lease.hostname) || '')}">固定 IP</button>
+        <button class="btn btn-sm" data-kick-mac="${esc(c.mac)}" data-kick-name="${esc(name)}">踢下线</button>
+        <button class="btn btn-sm btn-danger" data-block-mac="${esc(c.mac)}" data-block-name="${esc(name)}">拉黑</button>
       </td>
     </tr>`;
   }).join('');
@@ -768,6 +873,57 @@ async function renderClients() {
         <tbody>${rows || '<tr><td colspan="6" class="empty">暂无在线设备</td></tr>'}</tbody>
       </table></div>
     </div>`;
+
+  $$('[data-bind-mac]').forEach((b) => {
+    b.onclick = () => openModal(
+      `<h3>绑定 DHCP 静态 IP</h3>
+       <p class="sub mono">${esc(b.dataset.bindMac)}</p>
+       <form id="bind-f">
+         <label class="field"><span>主机名 (可选)</span><input name="name" value="${esc(b.dataset.bindName)}" placeholder="例如：nas"></label>
+         <label class="field"><span>固定 IPv4 地址</span><input name="ip" value="${esc(b.dataset.bindIp)}" placeholder="192.168.1.50" required></label>
+         <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">确认绑定</button></div>
+       </form>`,
+      {
+        onMount(el, close) {
+          el.querySelector('[data-cancel]').onclick = close;
+          el.querySelector('#bind-f').onsubmit = async (e) => {
+            e.preventDefault();
+            const f = new FormData(e.target);
+            try {
+              await api('/api/network/dhcp/hosts', {
+                method: 'POST',
+                body: { name: f.get('name').trim(), mac: b.dataset.bindMac, ip: f.get('ip').trim() },
+              });
+              close(); toast('静态 IP 绑定已保存');
+            } catch (ex) { handleErr(ex); }
+          };
+        },
+      }
+    );
+  });
+
+  $$('[data-kick-mac]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`确定要将终端「${b.dataset.kickName || b.dataset.kickMac}」踢下线吗？`)) return;
+      try {
+        await api(`/api/access/devices/${encodeURIComponent(b.dataset.kickMac)}/kick`, { method: 'POST', body: { ban_secs: 10 } });
+        toast('已强制踢下线');
+        go('clients');
+      } catch (e) { handleErr(e); }
+    };
+  });
+
+  $$('[data-block-mac]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm(`确定要拉黑终端「${b.dataset.blockName || b.dataset.blockMac}」并踢下线吗？`)) return;
+      try {
+        await api(`/api/access/devices/${encodeURIComponent(b.dataset.blockMac)}/block`, { method: 'POST', body: {} });
+        await api(`/api/access/devices/${encodeURIComponent(b.dataset.blockMac)}/kick`, { method: 'POST', body: { ban_secs: 60 } }).catch(() => {});
+        toast('已拉黑并断开连接');
+        go('clients');
+      } catch (e) { handleErr(e); }
+    };
+  });
 
   $$('[data-qos-mac]').forEach((b) => {
     b.onclick = () => openModal(
@@ -811,8 +967,9 @@ async function renderAccess() {
 
   const renderRows = (list, kind) => (list || []).map((dev) => {
     let btns = '';
-    if (kind === 'pending') btns = `<button class="btn btn-sm btn-primary" data-approve="${esc(dev.mac)}">放行</button> <button class="btn btn-sm btn-danger" data-block="${esc(dev.mac)}">拉黑</button>`;
-    else if (kind === 'authorized') btns = `<button class="btn btn-sm" data-revoke="${esc(dev.mac)}">撤销</button> <button class="btn btn-sm btn-danger" data-block="${esc(dev.mac)}">拉黑</button>`;
+    const kickBtn = dev.online ? ` <button class="btn btn-sm" data-kick="${esc(dev.mac)}">踢下线</button>` : '';
+    if (kind === 'pending') btns = `<button class="btn btn-sm btn-primary" data-approve="${esc(dev.mac)}">放行</button>${kickBtn} <button class="btn btn-sm btn-danger" data-block="${esc(dev.mac)}">拉黑</button>`;
+    else if (kind === 'authorized') btns = `<button class="btn btn-sm" data-revoke="${esc(dev.mac)}">撤销</button>${kickBtn} <button class="btn btn-sm btn-danger" data-block="${esc(dev.mac)}">拉黑</button>`;
     else btns = `<button class="btn btn-sm" data-unblock="${esc(dev.mac)}">解除拉黑</button>`;
     return `<tr>
       <td><div class="primary">${esc(dev.name || dev.hostname || dev.mac)}</div><div class="tiny muted mono">${esc(dev.mac)}</div></td>
@@ -864,6 +1021,7 @@ async function renderAccess() {
   };
   $$('[data-approve]').forEach((b) => { b.onclick = async () => { try { await api(`/api/access/devices/${encodeURIComponent(b.dataset.approve)}/authorize`, { method: 'POST', body: { expires_in: 0 } }); toast('已放行'); go('access'); } catch (e) { handleErr(e); } }; });
   $$('[data-revoke]').forEach((b) => { b.onclick = async () => { try { await api(`/api/access/devices/${encodeURIComponent(b.dataset.revoke)}/revoke`, { method: 'POST', body: {} }); toast('已撤销'); go('access'); } catch (e) { handleErr(e); } }; });
+  $$('[data-kick]').forEach((b) => { b.onclick = async () => { try { await api(`/api/access/devices/${encodeURIComponent(b.dataset.kick)}/kick`, { method: 'POST', body: { ban_secs: 10 } }); toast('已踢下线'); go('access'); } catch (e) { handleErr(e); } }; });
   $$('[data-block]').forEach((b) => { b.onclick = async () => { try { await api(`/api/access/devices/${encodeURIComponent(b.dataset.block)}/block`, { method: 'POST', body: {} }); toast('已拉黑'); go('access'); } catch (e) { handleErr(e); } }; });
   $$('[data-unblock]').forEach((b) => { b.onclick = async () => { try { await api(`/api/access/devices/${encodeURIComponent(b.dataset.unblock)}/unblock`, { method: 'POST', body: {} }); toast('已解除拉黑'); go('access'); } catch (e) { handleErr(e); } }; });
   $$('[data-agent-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/agents/${encodeURIComponent(b.dataset.agentDel)}`, { method: 'DELETE' }); toast('Token 已吊销'); go('access'); } catch (e) { handleErr(e); } }; });
@@ -889,13 +1047,36 @@ async function renderAccess() {
 
 async function renderFirewall() {
   const d = await api('/api/firewall');
-  const rows = (d.redirects || []).map((r) => `<tr>
+  const redirects = d.redirects || [];
+  const rules = d.rules || [];
+  const rows = redirects.map((r, idx) => `<tr>
     <td><div class="primary">${esc(r.name)}</div></td>
     <td class="mono">${esc(r.proto)}</td>
     <td class="mono">WAN:${esc(r.src_dport)} → ${esc(r.dest_ip)}:${esc(r.dest_port)}</td>
     <td><span class="badge ${r.enabled ? 'good' : 'muted'}">${r.enabled ? '生效中' : '已停用'}</span></td>
-    <td class="right"><button class="btn btn-sm btn-danger" data-del="${esc(r.section)}">${icon('trash')}</button></td>
+    <td class="right nowrap">
+      <button class="btn btn-sm" data-fw-toggle="${idx}">${r.enabled ? '停用' : '启用'}</button>
+      <button class="btn btn-sm" data-fw-edit="${idx}">编辑</button>
+      <button class="btn btn-sm btn-danger" data-del="${esc(r.section)}">${icon('trash')}</button>
+    </td>
   </tr>`).join('');
+
+  const ruleRows = rules.map((r, idx) => {
+    const targetCls = r.target === 'ACCEPT' ? 'good' : (r.target === 'DROP' || r.target === 'REJECT' ? 'bad' : 'muted');
+    const path = `${r.src || '*'} → ${r.dest || '本机'}${r.dest_port ? ':' + r.dest_port : ''}${r.src_ip ? ' (源:' + r.src_ip + ')' : ''}`;
+    return `<tr>
+      <td><div class="primary">${esc(r.name || r.section)}</div></td>
+      <td class="mono">${esc(r.proto || 'all')}</td>
+      <td class="mono tiny">${esc(path)}</td>
+      <td><span class="badge ${targetCls}">${esc(r.target || 'ACCEPT')}</span></td>
+      <td><span class="badge ${r.enabled ? 'good' : 'muted'}">${r.enabled ? '生效中' : '已停用'}</span></td>
+      <td class="right nowrap">
+        <button class="btn btn-sm" data-fwr-toggle="${idx}">${r.enabled ? '停用' : '启用'}</button>
+        <button class="btn btn-sm" data-fwr-edit="${idx}">编辑</button>
+        <button class="btn btn-sm btn-danger" data-fwr-del="${esc(r.section)}">${icon('trash')}</button>
+      </td>
+    </tr>`;
+  }).join('');
 
   $('#view').innerHTML = `
     <div class="card">
@@ -904,25 +1085,37 @@ async function renderFirewall() {
         <button class="btn btn-primary" id="fw-add">${icon('plus')}新建映射</button>
       </div>
       <div class="table-wrap mt-14"><table>
-        <thead><tr><th>名称</th><th>协议</th><th>映射路径</th><th>状态</th><th class="right">删除</th></tr></thead>
+        <thead><tr><th>名称</th><th>协议</th><th>映射路径</th><th>状态</th><th class="right">操作</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="5" class="empty">暂无端口转发规则</td></tr>'}</tbody>
+      </table></div>
+    </div>
+
+    <div class="card mt-20">
+      <div class="row-between">
+        <div><h2 style="margin:0;font-size:15px">防火墙通信规则 (Traffic Rules)</h2><p class="muted tiny" style="margin:4px 0 0">控制入站/转发流量放行、丢弃或拒绝策略</p></div>
+        <button class="btn btn-primary" id="fwr-add">${icon('plus')}新建规则</button>
+      </div>
+      <div class="table-wrap mt-14"><table>
+        <thead><tr><th>名称</th><th>协议</th><th>匹配条件</th><th>动作</th><th>状态</th><th class="right">操作</th></tr></thead>
+        <tbody>${ruleRows || '<tr><td colspan="6" class="empty">暂无通信规则</td></tr>'}</tbody>
       </table></div>
     </div>`;
 
-  $$('[data-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/firewall/redirects/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' }); toast('规则已删除'); go('firewall'); } catch (e) { handleErr(e); } }; });
-  $('#fw-add').onclick = () => openModal(
-    `<h3>新增端口转发</h3>
+  const openFwModal = (existing) => openModal(
+    `<h3>${existing ? '编辑端口转发' : '新增端口转发'}</h3>
      <form id="fw-f">
-       <label class="field"><span>规则名称</span><input name="name" placeholder="NAS" required></label>
+       <label class="field"><span>规则名称</span><input name="name" value="${esc(existing ? existing.name : '')}" placeholder="NAS" required></label>
        <div class="field-row">
-         <label class="field"><span>协议</span><select name="proto"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="tcp udp">TCP + UDP</option></select></label>
-         <label class="field"><span>外部端口</span><input name="src_dport" type="number" min="1" max="65535" required></label>
+         <label class="field"><span>协议</span><select name="proto">
+           ${['tcp', 'udp', 'tcp udp'].map((p) => `<option value="${p}" ${existing && existing.proto === p ? 'selected' : ''}>${p.toUpperCase().replace(' ', ' + ')}</option>`).join('')}
+         </select></label>
+         <label class="field"><span>外部端口</span><input name="src_dport" type="number" min="1" max="65535" value="${esc(existing ? existing.src_dport : '')}" required></label>
        </div>
        <div class="field-row">
-         <label class="field"><span>内网目标 IP</span><input name="dest_ip" placeholder="192.168.1.100" required></label>
-         <label class="field"><span>内网目标端口</span><input name="dest_port" type="number" min="1" max="65535" required></label>
+         <label class="field"><span>内网目标 IP</span><input name="dest_ip" value="${esc(existing ? existing.dest_ip : '')}" placeholder="192.168.1.100" required></label>
+         <label class="field"><span>内网目标端口</span><input name="dest_port" type="number" min="1" max="65535" value="${esc(existing ? existing.dest_port : '')}" required></label>
        </div>
-       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">创建</button></div>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '创建'}</button></div>
      </form>`,
     {
       onMount(el, close) {
@@ -930,14 +1123,115 @@ async function renderFirewall() {
         el.querySelector('#fw-f').onsubmit = async (e) => {
           e.preventDefault();
           const f = new FormData(e.target);
+          const payload = {
+            name: f.get('name'),
+            proto: f.get('proto'),
+            src_dport: f.get('src_dport'),
+            dest_ip: f.get('dest_ip'),
+            dest_port: f.get('dest_port'),
+          };
           try {
-            await api('/api/firewall/redirects', { method: 'POST', body: { name: f.get('name'), proto: f.get('proto'), src_dport: f.get('src_dport'), dest_ip: f.get('dest_ip'), dest_port: f.get('dest_port') } });
-            close(); toast('端口转发已创建'); go('firewall');
+            if (existing) {
+              await api(`/api/firewall/redirects/${encodeURIComponent(existing.section)}`, { method: 'PUT', body: payload });
+              toast('端口转发已更新');
+            } else {
+              await api('/api/firewall/redirects', { method: 'POST', body: payload });
+              toast('端口转发已创建');
+            }
+            close(); go('firewall');
           } catch (ex) { handleErr(ex); }
         };
       },
     }
   );
+
+  $$('[data-fw-toggle]').forEach((b) => {
+    b.onclick = async () => {
+      const r = redirects[Number(b.dataset.fwToggle)];
+      try {
+        await api(`/api/firewall/redirects/${encodeURIComponent(r.section)}`, { method: 'PATCH', body: { enabled: !r.enabled } });
+        toast(r.enabled ? '规则已停用' : '规则已启用');
+        go('firewall');
+      } catch (e) { handleErr(e); }
+    };
+  });
+  $$('[data-fw-edit]').forEach((b) => { b.onclick = () => openFwModal(redirects[Number(b.dataset.fwEdit)]); });
+  $$('[data-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/firewall/redirects/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' }); toast('规则已删除'); go('firewall'); } catch (e) { handleErr(e); } }; });
+  $('#fw-add').onclick = () => openFwModal(null);
+
+  const openTrafficRuleModal = (existing) => openModal(
+    `<h3>${existing ? '编辑通信规则' : '新增通信规则'}</h3>
+     <form id="fwr-f">
+       <div class="field-row">
+         <label class="field"><span>规则名称</span><input name="name" value="${esc(existing ? existing.name : '')}" placeholder="例如：允许外部 SSH" required></label>
+         <label class="field"><span>动作</span><select name="target">
+           ${['ACCEPT', 'DROP', 'REJECT'].map((t) => `<option value="${t}" ${existing && existing.target === t ? 'selected' : ''}>${t}</option>`).join('')}
+         </select></label>
+       </div>
+       <div class="field-row">
+         <label class="field"><span>源区域</span><select name="src">
+           ${['wan', 'lan', ''].map((z) => `<option value="${z}" ${existing && existing.src === z ? 'selected' : ''}>${z || '任意'}</option>`).join('')}
+         </select></label>
+         <label class="field"><span>目标区域</span><select name="dest">
+           ${['', 'lan', 'wan'].map((z) => `<option value="${z}" ${existing && existing.dest === z ? 'selected' : ''}>${z || '路由器本机 (Input)'}</option>`).join('')}
+         </select></label>
+       </div>
+       <div class="field-row">
+         <label class="field"><span>协议</span><select name="proto">
+           ${['tcp', 'udp', 'tcp udp', 'icmp', 'all'].map((p) => `<option value="${p}" ${existing && existing.proto === p ? 'selected' : ''}>${p.toUpperCase()}</option>`).join('')}
+         </select></label>
+         <label class="field"><span>目标端口 (可选)</span><input name="dest_port" value="${esc(existing ? existing.dest_port : '')}" placeholder="如 22 或 80 443"></label>
+       </div>
+       <label class="field"><span>源 IP / CIDR (可选)</span><input name="src_ip" value="${esc(existing ? existing.src_ip : '')}" placeholder="留空表示任意"></label>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '创建'}</button></div>
+     </form>`,
+    {
+      onMount(el, close) {
+        el.querySelector('[data-cancel]').onclick = close;
+        el.querySelector('#fwr-f').onsubmit = async (e) => {
+          e.preventDefault();
+          const f = new FormData(e.target);
+          const payload = {
+            name: f.get('name').trim(),
+            target: f.get('target'),
+            src: f.get('src'),
+            dest: f.get('dest'),
+            proto: f.get('proto'),
+            dest_port: f.get('dest_port').trim(),
+            src_ip: f.get('src_ip').trim(),
+          };
+          try {
+            if (existing) {
+              await api(`/api/firewall/rules/${encodeURIComponent(existing.section)}`, { method: 'PUT', body: payload });
+              toast('通信规则已更新');
+            } else {
+              await api('/api/firewall/rules', { method: 'POST', body: payload });
+              toast('通信规则已创建');
+            }
+            close(); go('firewall');
+          } catch (ex) { handleErr(ex); }
+        };
+      },
+    }
+  );
+  $('#fwr-add').onclick = () => openTrafficRuleModal(null);
+  $$('[data-fwr-edit]').forEach((b) => { b.onclick = () => openTrafficRuleModal(rules[Number(b.dataset.fwrEdit)]); });
+  $$('[data-fwr-toggle]').forEach((b) => {
+    b.onclick = async () => {
+      const r = rules[Number(b.dataset.fwrToggle)];
+      try {
+        await api(`/api/firewall/rules/${encodeURIComponent(r.section)}`, { method: 'PATCH', body: { enabled: !r.enabled } });
+        toast(r.enabled ? '规则已停用' : '规则已启用');
+        go('firewall');
+      } catch (e) { handleErr(e); }
+    };
+  });
+  $$('[data-fwr-del]').forEach((b) => {
+    b.onclick = async () => {
+      try { await api(`/api/firewall/rules/${encodeURIComponent(b.dataset.fwrDel)}`, { method: 'DELETE' }); toast('通信规则已删除'); go('firewall'); }
+      catch (e) { handleErr(e); }
+    };
+  });
 }
 
 async function renderSingbox() {
@@ -969,31 +1263,56 @@ async function renderSingbox() {
       <td class="mono">${esc(addr)}</td>
       <td>${sec}</td>
       <td class="mono" id="sb-lat-${esc(ob.tag)}">—</td>
-      <td class="right">
+      <td class="right nowrap">
         ${isBuiltin ? '' : `<button class="btn btn-sm" data-sb-test="${esc(ob.tag)}">测速</button>
+        <button class="btn btn-sm" data-sb-edit-ob="${idx}">编辑</button>
         <button class="btn btn-sm btn-danger" data-sb-del-ob="${idx}">${icon('trash')}</button>`}
       </td>
     </tr>`;
   }).join('');
 
-  const ruleSummary = (r) => {
-    const parts = [];
-    if (r.network && r.network.length) parts.push(`net:${r.network.join(',')}`);
-    if (r.src_mac && r.src_mac.length) parts.push(`mac:${r.src_mac.join(',')}`);
-    if (r.src_ip_cidr && r.src_ip_cidr.length) parts.push(`src:${r.src_ip_cidr.join(',')}`);
-    if (r.ip_cidr && r.ip_cidr.length) parts.push(`ip:${r.ip_cidr.join(',')}`);
-    if (r.domain_exact && r.domain_exact.length) parts.push(`exact:${r.domain_exact.join(',')}`);
-    if (r.domain_suffix && r.domain_suffix.length) parts.push(`suffix:${r.domain_suffix.join(',')}`);
-    if (r.domain_keyword && r.domain_keyword.length) parts.push(`kw:${r.domain_keyword.join(',')}`);
-    if (r.port && r.port.length) parts.push(`port:${r.port.join(',')}`);
-    return parts.join(' | ') || '（空规则）';
+  const ruleGroups = (r) => {
+    const groups = [];
+    if (r.domain_suffix && r.domain_suffix.length) groups.push({ k: '域名后缀', items: r.domain_suffix });
+    if (r.domain_exact && r.domain_exact.length) groups.push({ k: '精确域名', items: r.domain_exact });
+    if (r.domain_keyword && r.domain_keyword.length) groups.push({ k: '关键词', items: r.domain_keyword });
+    if (r.ip_cidr && r.ip_cidr.length) groups.push({ k: '目标 IP', items: r.ip_cidr });
+    if (r.src_ip_cidr && r.src_ip_cidr.length) groups.push({ k: '源 IP', items: r.src_ip_cidr });
+    if (r.src_mac && r.src_mac.length) groups.push({ k: 'MAC', items: r.src_mac });
+    if (r.port && r.port.length) groups.push({ k: '端口', items: r.port.map(String) });
+    if (r.network && r.network.length) groups.push({ k: '协议', items: r.network });
+    return groups;
+  };
+
+  const renderRuleChips = (r, idx, expanded = false) => {
+    const groups = ruleGroups(r);
+    if (!groups.length) return '<span class="muted tiny">（空规则）</span>';
+    const LIMIT = 4;
+    let hiddenCount = 0;
+    const chips = [];
+    groups.forEach((g) => {
+      const shown = expanded ? g.items : g.items.slice(0, LIMIT);
+      if (!expanded && g.items.length > LIMIT) hiddenCount += g.items.length - LIMIT;
+      chips.push(`<span class="rule-chip" title="${esc(`${g.k}: ${g.items.join(', ')}`)}"><span class="rule-chip-k">${esc(g.k)}</span>${esc(shown.join(', '))}${!expanded && g.items.length > LIMIT ? ' …' : ''}</span>`);
+    });
+    if (hiddenCount > 0) {
+      chips.push(`<button type="button" class="rule-more" data-sb-expand-rule="${idx}">+${hiddenCount} 项展开</button>`);
+    } else if (expanded && groups.some((g) => g.items.length > LIMIT)) {
+      chips.push(`<button type="button" class="rule-more" data-sb-collapse-rule="${idx}">收起</button>`);
+    }
+    return `<div class="rule-chips">${chips.join('')}</div>`;
   };
 
   const ruleRows = rules.map((r, idx) => `<tr>
-    <td><b>${esc(r.name || `规则 #${idx + 1}`)}</b></td>
-    <td class="mono tiny">${esc(ruleSummary(r))}</td>
-    <td><span class="badge">${esc(r.outbound)}</span></td>
-    <td class="right"><button class="btn btn-sm btn-danger" data-sb-del-rule="${idx}">${icon('trash')}</button></td>
+    <td class="nowrap"><b>${esc(r.name || `规则 #${idx + 1}`)}</b></td>
+    <td id="sb-rule-cond-${idx}">${renderRuleChips(r, idx, false)}</td>
+    <td class="nowrap"><span class="badge">${esc(r.outbound)}</span></td>
+    <td class="right nowrap">
+      <button class="btn btn-sm" data-sb-move-rule="${idx}:-1" ${idx === 0 ? 'disabled' : ''} title="上移">↑</button>
+      <button class="btn btn-sm" data-sb-move-rule="${idx}:1" ${idx === rules.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+      <button class="btn btn-sm" data-sb-edit-rule="${idx}">编辑</button>
+      <button class="btn btn-sm btn-danger" data-sb-del-rule="${idx}">${icon('trash')}</button>
+    </td>
   </tr>`).join('');
 
   const obOptions = outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${ob.tag === finalOb ? 'selected' : ''}>${esc(ob.tag)} (${esc(ob.type)})</option>`).join('');
@@ -1048,21 +1367,21 @@ async function renderSingbox() {
       </table></div>
     </div>
 
-    <div class="grid grid-2 mt-14">
-      <div class="card">
-        <div class="row-between">
-          <div><h2 style="margin:0;font-size:15px">分流规则</h2></div>
-          <div class="row gap-8">
-            <button class="btn btn-sm" id="sb-reset-rules">恢复内置规则</button>
-            <button class="btn btn-sm btn-primary" id="sb-add-rule">${icon('plus')}添加规则</button>
-          </div>
+    <div class="card mt-14">
+      <div class="row-between">
+        <div><h2 style="margin:0;font-size:15px">分流规则</h2><p class="muted tiny" style="margin:4px 0 0">按自上而下顺序匹配，支持展开查看全部条件、调整优先级与在线编辑</p></div>
+        <div class="row gap-8">
+          <button class="btn btn-sm" id="sb-reset-rules">恢复内置规则</button>
+          <button class="btn btn-sm btn-primary" id="sb-add-rule">${icon('plus')}添加规则</button>
         </div>
-        <div class="table-wrap mt-14"><table>
-          <thead><tr><th>规则名称</th><th>匹配条件</th><th>目标出站</th><th class="right">删除</th></tr></thead>
-          <tbody>${ruleRows || '<tr><td colspan="4" class="empty">暂无自定义规则</td></tr>'}</tbody>
-        </table></div>
       </div>
+      <div class="table-wrap mt-14"><table>
+        <thead><tr><th>规则名称</th><th>匹配条件</th><th>目标出站</th><th class="right">操作</th></tr></thead>
+        <tbody>${ruleRows || '<tr><td colspan="4" class="empty">暂无自定义规则</td></tr>'}</tbody>
+      </table></div>
+    </div>
 
+    <div class="grid grid-2 mt-14">
       <div class="card">
         <div class="card-title"><h2>全局路由与内核参数</h2></div>
         <form id="sb-global-form">
@@ -1076,18 +1395,6 @@ async function renderSingbox() {
           </div>
           <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}保存全局设置</button></div>
         </form>
-      </div>
-    </div>
-
-    <div class="grid grid-2 mt-14">
-      <div class="card">
-        <div class="row-between">
-          <div><h2 style="margin:0;font-size:15px">终端 MAC 分流策略</h2><p class="muted tiny" style="margin:4px 0 0">联动 routerd 终端表，为指定设备单独指定直连 / 代理 / 拦截出站</p></div>
-        </div>
-        <div class="table-wrap mt-14"><table>
-          <thead><tr><th>终端名称</th><th>IP</th><th>MAC 地址</th><th class="right">出站策略</th></tr></thead>
-          <tbody>${devRows || '<tr><td colspan="4" class="empty">暂无已发现终端</td></tr>'}</tbody>
-        </table></div>
       </div>
 
       <div class="card">
@@ -1117,6 +1424,16 @@ async function renderSingbox() {
           <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}保存 DNS 设置</button></div>
         </form>
       </div>
+    </div>
+
+    <div class="card mt-14">
+      <div class="row-between">
+        <div><h2 style="margin:0;font-size:15px">终端 MAC 分流策略</h2><p class="muted tiny" style="margin:4px 0 0">联动 routerd 终端表，为指定设备单独指定直连 / 代理 / 拦截出站</p></div>
+      </div>
+      <div class="table-wrap mt-14"><table>
+        <thead><tr><th>终端名称</th><th>IP</th><th>MAC 地址</th><th class="right">出站策略</th></tr></thead>
+        <tbody>${devRows || '<tr><td colspan="4" class="empty">暂无已发现终端</td></tr>'}</tbody>
+      </table></div>
     </div>`;
 
   $('#sb-toggle').onclick = async () => {
@@ -1259,191 +1576,264 @@ async function renderSingbox() {
     try { await saveConfig(next, 'DNS 与 FakeIP 设置已保存'); } catch (ex) { handleErr(ex); }
   };
 
-  $('#sb-add-ob').onclick = () => openModal(
-    `<h3>添加出站节点</h3>
-     <form id="sb-ob-f">
-       <div class="field-row">
-         <label class="field"><span>节点标签</span><input name="tag" placeholder="hk-1" required></label>
-         <label class="field"><span>协议类型</span><select name="type" id="sb-ob-type">
-           <option value="vless">VLESS</option>
-           <option value="vmess">VMess</option>
-           <option value="trojan">Trojan</option>
-           <option value="shadowsocks">Shadowsocks</option>
-           <option value="socks">SOCKS5</option>
-           <option value="http">HTTP</option>
-         </select></label>
-       </div>
-       <div class="field-row">
-         <label class="field"><span>服务器地址</span><input name="server" placeholder="example.com" required></label>
-         <label class="field"><span>端口</span><input name="server_port" type="number" min="1" max="65535" value="443" required></label>
-       </div>
-       <div id="sb-ss-fields" class="hidden">
+  const bindRuleExpand = (idx) => {
+    const cell = $(`#sb-rule-cond-${idx}`);
+    if (!cell) return;
+    const expBtn = cell.querySelector('[data-sb-expand-rule]');
+    if (expBtn) {
+      expBtn.onclick = () => {
+        cell.innerHTML = renderRuleChips(rules[idx], idx, true);
+        bindRuleExpand(idx);
+      };
+    }
+    const colBtn = cell.querySelector('[data-sb-collapse-rule]');
+    if (colBtn) {
+      colBtn.onclick = () => {
+        cell.innerHTML = renderRuleChips(rules[idx], idx, false);
+        bindRuleExpand(idx);
+      };
+    }
+  };
+  rules.forEach((_, idx) => bindRuleExpand(idx));
+
+  $$('[data-sb-move-rule]').forEach((b) => {
+    b.onclick = async () => {
+      const [idxStr, dirStr] = b.dataset.sbMoveRule.split(':');
+      const idx = Number(idxStr);
+      const target = idx + Number(dirStr);
+      if (target < 0 || target >= rules.length) return;
+      const next = structuredClone(cfg);
+      const [moved] = next.route.rules.splice(idx, 1);
+      next.route.rules.splice(target, 0, moved);
+      try { await saveConfig(next, '规则优先级已调整'); } catch (ex) { handleErr(ex); }
+    };
+  });
+
+  const openOutboundModal = (editIdx) => {
+    const existing = editIdx != null ? outbounds[editIdx] : null;
+    const exTls = (existing && existing.tls) || {};
+    const exReality = exTls.reality || {};
+    const exTrans = (existing && existing.transport) || {};
+    const exCred = existing ? (existing.uuid || existing.password || '') : '';
+    const obTypes = [
+      ['vless', 'VLESS'],
+      ['vmess', 'VMess'],
+      ['trojan', 'Trojan'],
+      ['shadowsocks', 'Shadowsocks'],
+      ['socks', 'SOCKS5'],
+      ['http', 'HTTP'],
+    ];
+    const ssMethods = [
+      'aes-128-gcm',
+      'aes-256-gcm',
+      'chacha20-ietf-poly1305',
+      '2022-blake3-aes-128-gcm',
+      '2022-blake3-aes-256-gcm',
+      '2022-blake3-chacha20-poly1305',
+    ];
+    openModal(
+      `<h3>${existing ? '编辑出站节点' : '添加出站节点'}</h3>
+       <form id="sb-ob-f">
          <div class="field-row">
-           <label class="field"><span>加密方式</span><select name="method">
-             <option value="aes-128-gcm">aes-128-gcm</option>
-             <option value="aes-256-gcm">aes-256-gcm</option>
-             <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
-             <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option>
-             <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
-             <option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option>
+           <label class="field"><span>节点标签</span><input name="tag" value="${esc(existing ? existing.tag : '')}" placeholder="hk-1" required></label>
+           <label class="field"><span>协议类型</span><select name="type" id="sb-ob-type">
+             ${obTypes.map(([v, l]) => `<option value="${v}" ${existing && existing.type === v ? 'selected' : ''}>${l}</option>`).join('')}
            </select></label>
-           <label class="field"><span>密码</span><input name="ss_password"></label>
          </div>
-       </div>
-       <div id="sb-cred-field">
          <div class="field-row">
-           <label class="field"><span id="sb-cred-label">UUID</span><input name="cred" placeholder="UUID 或密码"></label>
-           <label class="field" id="sb-flow-field"><span>流控 (VLESS Flow)</span><select name="flow">
-             <option value="">无</option>
-             <option value="xtls-rprx-vision">xtls-rprx-vision</option>
-           </select></label>
+           <label class="field"><span>服务器地址</span><input name="server" value="${esc(existing ? (existing.server || '') : '')}" placeholder="example.com" required></label>
+           <label class="field"><span>端口</span><input name="server_port" type="number" min="1" max="65535" value="${esc(existing ? (existing.server_port || 443) : 443)}" required></label>
          </div>
-       </div>
-       <div id="sb-tls-fields">
-         <div class="field-row">
-           <label class="field"><span>启用 TLS</span><select name="tls_enabled"><option value="1">是</option><option value="0">否</option></select></label>
-           <label class="field"><span>跳过证书校验 (insecure)</span><select name="insecure"><option value="0">否 (推荐)</option><option value="1">是</option></select></label>
+         <div id="sb-ss-fields" class="hidden">
+           <div class="field-row">
+             <label class="field"><span>加密方式</span><select name="method">
+               ${ssMethods.map((m) => `<option value="${m}" ${existing && existing.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+             </select></label>
+             <label class="field"><span>密码</span><input name="ss_password" value="${esc(existing && existing.type === 'shadowsocks' ? (existing.password || '') : '')}"></label>
+           </div>
          </div>
-         <label class="field"><span>SNI (server_name)</span><input name="sni" placeholder="example.com"></label>
-         <div class="field-row" id="sb-ws-fields">
-           <label class="field"><span>传输层</span><select name="transport_type"><option value="tcp">TCP</option><option value="ws">WebSocket (ws)</option></select></label>
-           <label class="field"><span>WS Path</span><input name="ws_path" placeholder="/ws"></label>
-           <label class="field"><span>WS Host</span><input name="ws_host" placeholder="可选"></label>
+         <div id="sb-cred-field">
+           <div class="field-row">
+             <label class="field"><span id="sb-cred-label">UUID</span><input name="cred" value="${esc(exCred)}" placeholder="UUID 或密码"></label>
+             <label class="field" id="sb-flow-field"><span>流控 (VLESS Flow)</span><select name="flow">
+               <option value="" ${!existing || !existing.flow ? 'selected' : ''}>无</option>
+               <option value="xtls-rprx-vision" ${existing && existing.flow === 'xtls-rprx-vision' ? 'selected' : ''}>xtls-rprx-vision</option>
+             </select></label>
+           </div>
          </div>
-         <div class="field-row" id="sb-reality-fields">
-           <label class="field"><span>Reality Public Key (可选)</span><input name="reality_pk" placeholder="留空则使用普通 TLS"></label>
-           <label class="field"><span>Reality Short ID</span><input name="reality_sid" placeholder="可选"></label>
+         <div id="sb-tls-fields">
+           <div class="field-row">
+             <label class="field"><span>启用 TLS</span><select name="tls_enabled"><option value="1" ${!existing || exTls.enabled !== false ? 'selected' : ''}>是</option><option value="0" ${existing && exTls.enabled === false ? 'selected' : ''}>否</option></select></label>
+             <label class="field"><span>跳过证书校验 (insecure)</span><select name="insecure"><option value="0" ${!exTls.insecure ? 'selected' : ''}>否 (推荐)</option><option value="1" ${exTls.insecure ? 'selected' : ''}>是</option></select></label>
+           </div>
+           <label class="field"><span>SNI (server_name)</span><input name="sni" value="${esc(exTls.server_name || '')}" placeholder="example.com"></label>
+           <div class="field-row" id="sb-ws-fields">
+             <label class="field"><span>传输层</span><select name="transport_type"><option value="tcp" ${exTrans.type !== 'ws' ? 'selected' : ''}>TCP</option><option value="ws" ${exTrans.type === 'ws' ? 'selected' : ''}>WebSocket (ws)</option></select></label>
+             <label class="field"><span>WS Path</span><input name="ws_path" value="${esc(exTrans.path || '')}" placeholder="/ws"></label>
+             <label class="field"><span>WS Host</span><input name="ws_host" value="${esc(exTrans.host || '')}" placeholder="可选"></label>
+           </div>
+           <div class="field-row" id="sb-reality-fields">
+             <label class="field"><span>Reality Public Key (可选)</span><input name="reality_pk" value="${esc(exReality.public_key || '')}" placeholder="留空则使用普通 TLS"></label>
+             <label class="field"><span>Reality Short ID</span><input name="reality_sid" value="${esc(exReality.short_id || '')}" placeholder="可选"></label>
+           </div>
          </div>
-       </div>
-       <div id="sb-userpass-fields" class="hidden">
-         <div class="field-row">
-           <label class="field"><span>用户名 (可选)</span><input name="proxy_user"></label>
-           <label class="field"><span>密码 (可选)</span><input name="proxy_pass"></label>
+         <div id="sb-userpass-fields" class="hidden">
+           <div class="field-row">
+             <label class="field"><span>用户名 (可选)</span><input name="proxy_user" value="${esc(existing ? (existing.username || '') : '')}"></label>
+             <label class="field"><span>密码 (可选)</span><input name="proxy_pass" value="${esc(existing ? (existing.password || '') : '')}"></label>
+           </div>
          </div>
-       </div>
-       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">添加</button></div>
-     </form>`,
-    {
-      onMount(el, close) {
-        const typeSel = el.querySelector('#sb-ob-type');
-        const syncFields = () => {
-          const t = typeSel.value;
-          const isAuthProxy = t === 'socks' || t === 'http';
-          el.querySelector('#sb-ss-fields').classList.toggle('hidden', t !== 'shadowsocks');
-          el.querySelector('#sb-cred-field').classList.toggle('hidden', t === 'shadowsocks' || isAuthProxy);
-          el.querySelector('#sb-flow-field').classList.toggle('hidden', t !== 'vless');
-          el.querySelector('#sb-tls-fields').classList.toggle('hidden', t === 'shadowsocks' || t === 'socks');
-          el.querySelector('#sb-ws-fields').classList.toggle('hidden', isAuthProxy || t === 'shadowsocks');
-          el.querySelector('#sb-reality-fields').classList.toggle('hidden', t !== 'vless');
-          el.querySelector('#sb-userpass-fields').classList.toggle('hidden', !isAuthProxy);
-          el.querySelector('#sb-cred-label').textContent = (t === 'vless' || t === 'vmess') ? 'UUID' : 'Trojan 密码';
-        };
-        typeSel.onchange = syncFields;
-        syncFields();
-        el.querySelector('[data-cancel]').onclick = close;
-        el.querySelector('#sb-ob-f').onsubmit = async (e) => {
-          e.preventDefault();
-          const f = new FormData(e.target);
-          const t = f.get('type');
-          let ob;
-          if (t === 'shadowsocks') {
-            ob = {
-              type: 'shadowsocks',
-              tag: f.get('tag').trim(),
-              server: f.get('server').trim(),
-              server_port: Number(f.get('server_port')),
-              method: f.get('method'),
-              password: f.get('ss_password'),
-            };
-          } else if (t === 'socks' || t === 'http') {
-            ob = {
-              type: t,
-              tag: f.get('tag').trim(),
-              server: f.get('server').trim(),
-              server_port: Number(f.get('server_port')),
-              username: f.get('proxy_user').trim() || null,
-              password: f.get('proxy_pass') || null,
-            };
-            if (t === 'http') {
-              ob.tls = {
+         <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '添加'}</button></div>
+       </form>`,
+      {
+        onMount(el, close) {
+          const typeSel = el.querySelector('#sb-ob-type');
+          const syncFields = () => {
+            const t = typeSel.value;
+            const isAuthProxy = t === 'socks' || t === 'http';
+            el.querySelector('#sb-ss-fields').classList.toggle('hidden', t !== 'shadowsocks');
+            el.querySelector('#sb-cred-field').classList.toggle('hidden', t === 'shadowsocks' || isAuthProxy);
+            el.querySelector('#sb-flow-field').classList.toggle('hidden', t !== 'vless');
+            el.querySelector('#sb-tls-fields').classList.toggle('hidden', t === 'shadowsocks' || t === 'socks');
+            el.querySelector('#sb-ws-fields').classList.toggle('hidden', isAuthProxy || t === 'shadowsocks');
+            el.querySelector('#sb-reality-fields').classList.toggle('hidden', t !== 'vless');
+            el.querySelector('#sb-userpass-fields').classList.toggle('hidden', !isAuthProxy);
+            el.querySelector('#sb-cred-label').textContent = (t === 'vless' || t === 'vmess') ? 'UUID' : 'Trojan 密码';
+          };
+          typeSel.onchange = syncFields;
+          syncFields();
+          el.querySelector('[data-cancel]').onclick = close;
+          el.querySelector('#sb-ob-f').onsubmit = async (e) => {
+            e.preventDefault();
+            const f = new FormData(e.target);
+            const t = f.get('type');
+            let ob;
+            if (t === 'shadowsocks') {
+              ob = {
+                type: 'shadowsocks',
+                tag: f.get('tag').trim(),
+                server: f.get('server').trim(),
+                server_port: Number(f.get('server_port')),
+                method: f.get('method'),
+                password: f.get('ss_password'),
+              };
+            } else if (t === 'socks' || t === 'http') {
+              ob = {
+                type: t,
+                tag: f.get('tag').trim(),
+                server: f.get('server').trim(),
+                server_port: Number(f.get('server_port')),
+                username: f.get('proxy_user').trim() || null,
+                password: f.get('proxy_pass') || null,
+              };
+              if (t === 'http') {
+                ob.tls = {
+                  enabled: f.get('tls_enabled') === '1',
+                  server_name: f.get('sni').trim() || null,
+                  insecure: f.get('insecure') === '1',
+                  alpn: [],
+                  reality: null,
+                };
+              }
+            } else {
+              const pk = f.get('reality_pk').trim();
+              const tls = {
                 enabled: f.get('tls_enabled') === '1',
                 server_name: f.get('sni').trim() || null,
                 insecure: f.get('insecure') === '1',
                 alpn: [],
-                reality: null,
+                reality: pk ? { enabled: true, public_key: pk, short_id: f.get('reality_sid').trim() } : null,
               };
+              const transport = {
+                type: f.get('transport_type') || 'tcp',
+                path: f.get('ws_path').trim() || null,
+                host: f.get('ws_host').trim() || null,
+              };
+              if (t === 'vless') {
+                ob = { type: 'vless', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), flow: f.get('flow') || '', tls, transport };
+              } else if (t === 'vmess') {
+                ob = { type: 'vmess', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), security: 'auto', tls, transport };
+              } else {
+                ob = { type: 'trojan', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), password: f.get('cred'), tls, transport };
+              }
             }
-          } else {
-            const pk = f.get('reality_pk').trim();
-            const tls = {
-              enabled: f.get('tls_enabled') === '1',
-              server_name: f.get('sni').trim() || null,
-              insecure: f.get('insecure') === '1',
-              alpn: [],
-              reality: pk ? { enabled: true, public_key: pk, short_id: f.get('reality_sid').trim() } : null,
-            };
-            const transport = {
-              type: f.get('transport_type') || 'tcp',
-              path: f.get('ws_path').trim() || null,
-              host: f.get('ws_host').trim() || null,
-            };
-            if (t === 'vless') {
-              ob = { type: 'vless', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), flow: f.get('flow') || '', tls, transport };
-            } else if (t === 'vmess') {
-              ob = { type: 'vmess', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), security: 'auto', tls, transport };
+            const next = structuredClone(cfg);
+            if (existing) {
+              const oldTag = existing.tag;
+              next.outbounds[editIdx] = ob;
+              if (oldTag && oldTag !== ob.tag) {
+                (next.route.rules || []).forEach((r) => { if (r.outbound === oldTag) r.outbound = ob.tag; });
+                if (next.route.final === oldTag) next.route.final = ob.tag;
+              }
             } else {
-              ob = { type: 'trojan', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), password: f.get('cred'), tls, transport };
+              next.outbounds.push(ob);
             }
-          }
-          const next = structuredClone(cfg);
-          next.outbounds.push(ob);
-          try { await saveConfig(next, '出站节点已添加'); close(); } catch (ex) { handleErr(ex); }
-        };
-      },
-    }
-  );
-
-  $('#sb-add-rule').onclick = () => openModal(
-    `<h3>添加分流规则</h3>
-     <form id="sb-rule-f">
-       <div class="field-row">
-         <label class="field"><span>规则名称</span><input name="name" placeholder="例如：国内直连 / AI 代理" required></label>
-         <label class="field"><span>目标出站</span><select name="outbound">${outbounds.map((ob) => `<option value="${esc(ob.tag)}">${esc(ob.tag)}</option>`).join('')}</select></label>
-       </div>
-       <label class="field"><span>域名后缀 (逗号分隔)</span><input name="domain_suffix" placeholder="cn, baidu.com"></label>
-       <label class="field"><span>目标 IP CIDR (逗号分隔)</span><input name="ip_cidr" placeholder="192.168.0.0/16, 10.0.0.0/8"></label>
-       <div class="field-row">
-         <label class="field"><span>源 IP CIDR</span><input name="src_ip_cidr" placeholder="192.168.1.100/32"></label>
-         <label class="field"><span>目标端口</span><input name="port" placeholder="53, 443"></label>
-       </div>
-       <label class="field"><span>传输协议 (tcp / udp)</span><input name="network" placeholder="udp"></label>
-       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">添加</button></div>
-     </form>`,
-    {
-      onMount(el, close) {
-        const splitCsv = (s) => (s || '').split(',').map((v) => v.trim()).filter(Boolean);
-        el.querySelector('[data-cancel]').onclick = close;
-        el.querySelector('#sb-rule-f').onsubmit = async (e) => {
-          e.preventDefault();
-          const f = new FormData(e.target);
-          const rule = {
-            name: f.get('name').trim(),
-            ip_cidr: splitCsv(f.get('ip_cidr')),
-            src_ip_cidr: splitCsv(f.get('src_ip_cidr')),
-            domain_suffix: splitCsv(f.get('domain_suffix')),
-            domain_exact: [],
-            domain_keyword: [],
-            port: splitCsv(f.get('port')).map((p) => Number(p)).filter((p) => p > 0 && p <= 65535),
-            network: splitCsv(f.get('network')),
-            outbound: f.get('outbound'),
+            try { await saveConfig(next, existing ? '出站节点已更新' : '出站节点已添加'); close(); } catch (ex) { handleErr(ex); }
           };
-          const next = structuredClone(cfg);
-          next.route.rules.push(rule);
-          try { await saveConfig(next, '分流规则已添加'); close(); } catch (ex) { handleErr(ex); }
-        };
-      },
-    }
-  );
+        },
+      }
+    );
+  };
+
+  $('#sb-add-ob').onclick = () => openOutboundModal(null);
+  $$('[data-sb-edit-ob]').forEach((b) => { b.onclick = () => openOutboundModal(Number(b.dataset.sbEditOb)); });
+
+  const openRuleModal = (editIdx) => {
+    const existing = editIdx != null ? rules[editIdx] : null;
+    openModal(
+      `<h3>${existing ? '编辑分流规则' : '添加分流规则'}</h3>
+       <form id="sb-rule-f">
+         <div class="field-row">
+           <label class="field"><span>规则名称</span><input name="name" value="${esc(existing ? (existing.name || '') : '')}" placeholder="例如：国内直连 / AI 代理" required></label>
+           <label class="field"><span>目标出站</span><select name="outbound">${outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${existing && existing.outbound === ob.tag ? 'selected' : ''}>${esc(ob.tag)}</option>`).join('')}</select></label>
+         </div>
+         <label class="field"><span>域名后缀 (逗号或换行分隔)</span><textarea name="domain_suffix" rows="2" placeholder="cn, baidu.com, google.com">${esc(existing ? (existing.domain_suffix || []).join(', ') : '')}</textarea></label>
+         <div class="field-row">
+           <label class="field"><span>精确域名 (逗号分隔)</span><input name="domain_exact" value="${esc(existing ? (existing.domain_exact || []).join(', ') : '')}" placeholder="api.github.com"></label>
+           <label class="field"><span>域名关键词 (逗号分隔)</span><input name="domain_keyword" value="${esc(existing ? (existing.domain_keyword || []).join(', ') : '')}" placeholder="google, openai"></label>
+         </div>
+         <label class="field"><span>目标 IP CIDR (逗号或换行分隔)</span><textarea name="ip_cidr" rows="2" placeholder="192.168.0.0/16, 10.0.0.0/8">${esc(existing ? (existing.ip_cidr || []).join(', ') : '')}</textarea></label>
+         <div class="field-row">
+           <label class="field"><span>源 IP CIDR</span><input name="src_ip_cidr" value="${esc(existing ? (existing.src_ip_cidr || []).join(', ') : '')}" placeholder="192.168.1.100/32"></label>
+           <label class="field"><span>源 MAC 地址</span><input name="src_mac" value="${esc(existing ? (existing.src_mac || []).join(', ') : '')}" placeholder="AA:BB:CC:DD:EE:FF"></label>
+         </div>
+         <div class="field-row">
+           <label class="field"><span>目标端口</span><input name="port" value="${esc(existing ? (existing.port || []).join(', ') : '')}" placeholder="53, 443"></label>
+           <label class="field"><span>传输协议 (tcp / udp)</span><input name="network" value="${esc(existing ? (existing.network || []).join(', ') : '')}" placeholder="udp"></label>
+         </div>
+         <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">${existing ? '保存修改' : '添加'}</button></div>
+       </form>`,
+      {
+        onMount(el, close) {
+          const splitCsv = (s) => (s || '').split(/[,\n\r]+/).map((v) => v.trim()).filter(Boolean);
+          el.querySelector('[data-cancel]').onclick = close;
+          el.querySelector('#sb-rule-f').onsubmit = async (e) => {
+            e.preventDefault();
+            const f = new FormData(e.target);
+            const rule = {
+              name: f.get('name').trim(),
+              ip_cidr: splitCsv(f.get('ip_cidr')),
+              src_ip_cidr: splitCsv(f.get('src_ip_cidr')),
+              src_mac: splitCsv(f.get('src_mac')),
+              domain_suffix: splitCsv(f.get('domain_suffix')),
+              domain_exact: splitCsv(f.get('domain_exact')),
+              domain_keyword: splitCsv(f.get('domain_keyword')),
+              port: splitCsv(f.get('port')).map((p) => Number(p)).filter((p) => p > 0 && p <= 65535),
+              network: splitCsv(f.get('network')),
+              outbound: f.get('outbound'),
+            };
+            const next = structuredClone(cfg);
+            if (existing) next.route.rules[editIdx] = rule;
+            else next.route.rules.push(rule);
+            try { await saveConfig(next, existing ? '分流规则已更新' : '分流规则已添加'); close(); } catch (ex) { handleErr(ex); }
+          };
+        },
+      }
+    );
+  };
+
+  $('#sb-add-rule').onclick = () => openRuleModal(null);
+  $$('[data-sb-edit-rule]').forEach((b) => { b.onclick = () => openRuleModal(Number(b.dataset.sbEditRule)); });
 }
 
 async function renderSystem() {

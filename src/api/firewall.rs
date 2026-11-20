@@ -33,6 +33,16 @@ pub async fn delete_redirect(Path(section): Path<String>) -> ApiResult<Json<Valu
     Ok(ok(json!({"deleted": true})))
 }
 
+pub async fn update_redirect(
+    Path(section): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || firewall::update_redirect(&section, &body))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(ok(json!({"updated": true})))
+}
+
 pub async fn patch_redirect(
     Path(section): Path<String>,
     Json(body): Json<Value>,
@@ -42,6 +52,44 @@ pub async fn patch_redirect(
         .and_then(|v| v.as_bool())
         .ok_or_else(|| ApiError::bad("缺少 enabled 字段"))?;
     tokio::task::spawn_blocking(move || firewall::set_redirect_enabled(&section, enabled))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(ok(json!({"enabled": enabled})))
+}
+
+pub async fn add_rule(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+    let section = tokio::task::spawn_blocking(move || firewall::add_rule(&body))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(ok(json!({"section": section})))
+}
+
+pub async fn update_rule(
+    Path(section): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || firewall::update_rule(&section, &body))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(ok(json!({"updated": true})))
+}
+
+pub async fn delete_rule(Path(section): Path<String>) -> ApiResult<Json<Value>> {
+    tokio::task::spawn_blocking(move || firewall::delete_rule(&section))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(ok(json!({"deleted": true})))
+}
+
+pub async fn patch_rule(
+    Path(section): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| ApiError::bad("缺少 enabled 字段"))?;
+    tokio::task::spawn_blocking(move || firewall::set_rule_enabled(&section, enabled))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(ok(json!({"enabled": enabled})))

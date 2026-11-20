@@ -168,6 +168,16 @@ fn protected_router(state: AppState) -> Router {
         .route("/api/network/wan/redial", post(network::redial))
         .route("/api/network/wan/pppoe-log", get(network::pppoe_log))
         .route("/api/network/lan", put(network::update_lan))
+        .route("/api/network/dhcp/hosts", post(network::add_static_lease))
+        .route(
+            "/api/network/dhcp/hosts/{section}",
+            put(network::update_static_lease).delete(network::delete_static_lease),
+        )
+        .route("/api/network/dns/domains", post(network::add_custom_host))
+        .route(
+            "/api/network/dns/domains/{section}",
+            put(network::update_custom_host).delete(network::delete_custom_host),
+        )
         .route("/api/network/reload", post(network::reload))
         .route("/api/wireless", get(wireless::get).put(wireless::update))
         .route("/api/wireless/reload", post(wireless::reload))
@@ -176,7 +186,16 @@ fn protected_router(state: AppState) -> Router {
         .route("/api/firewall/redirects", post(firewall::add_redirect))
         .route(
             "/api/firewall/redirects/{section}",
-            delete(firewall::delete_redirect).patch(firewall::patch_redirect),
+            delete(firewall::delete_redirect)
+                .put(firewall::update_redirect)
+                .patch(firewall::patch_redirect),
+        )
+        .route("/api/firewall/rules", post(firewall::add_rule))
+        .route(
+            "/api/firewall/rules/{section}",
+            delete(firewall::delete_rule)
+                .put(firewall::update_rule)
+                .patch(firewall::patch_rule),
         )
         .route("/api/firmware", get(firmware::info))
         .route(
@@ -191,6 +210,7 @@ fn protected_router(state: AppState) -> Router {
         .route("/api/access/devices/{mac}/block", post(access::block))
         .route("/api/access/devices/{mac}/unblock", post(access::unblock))
         .route("/api/access/devices/{mac}/limit", post(access::rate_limit))
+        .route("/api/access/devices/{mac}/kick", post(access::kick))
         .route(
             "/api/agents",
             get(access::list_agents).post(access::create_agent),

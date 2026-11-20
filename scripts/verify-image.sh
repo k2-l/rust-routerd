@@ -43,6 +43,8 @@ check "embedded UI not on disk" "[ ! -e '$R/www/luci-static' ]"
 echo
 echo "== stock web / ipv6 / opkg stacks removed =="
 check "no uhttpd binary" "[ ! -e '$R/usr/sbin/uhttpd' ]"
+check "no uhttpd packages in apk" "! grep -q '^P:uhttpd' '$R/lib/apk/db/installed'"
+check "no LuCI packages in apk" "! grep -q '^P:luci' '$R/lib/apk/db/installed'"
 check "no LuCI lua tree" "[ ! -d '$R/usr/lib/lua/luci' ]"
 check "no LuCI www tree" "[ ! -d '$R/www/luci-static' ]"
 check "no odhcp6c binary" "[ ! -e '$R/usr/sbin/odhcp6c' ]"

@@ -254,6 +254,62 @@ pub async fn rate_limit(
     Ok(ok(json!({ "device": device.view(now_unix()) })))
 }
 
+#[derive(Deserialize, Default)]
+pub struct KickBody {
+    #[serde(default)]
+    ban_secs: Option<u64>,
+}
+
+pub async fn kick(
+    State(state): State<AppState>,
+    Extension(PeerAddr(ip)): Extension<PeerAddr>,
+    Path(mac): Path<String>,
+    body: Option<Json<KickBody>>,
+) -> ApiResult<Json<Value>> {
+    let mac = normalize_mac(&mac).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
+    let ban_ms = body
+        .and_then(|Json(b)| b.ban_secs)
+        .unwrap_or(10)
+        .min(3600)
+        .saturating_mul(1000);
+
+    let client_ip = {
+        let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
+        let dev_ip = store.get(&mac).map(|d| d.ip.clone()).filter(|s| !s.is_empty());
+        if let Some(dev) = store.devices.get_mut(&mac) {
+            dev.online = false;
+        }
+        dev_ip
+    };
+
+    let (wifi_deauth, conntrack_flushed) = if state.sim {
+        (true, true)
+    } else {
+        let mac_c = mac.clone();
+        let ip_c = client_ip.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::openwrt::wireless::kick_client(&mac_c, ip_c.as_deref(), ban_ms)
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?
+    };
+
+    agents::audit(
+        &state.data_dir,
+        "session:root",
+        "kick",
+        &mac,
+        &format!("wifi_deauth={wifi_deauth},conntrack={conntrack_flushed}"),
+        &ip.to_string(),
+    );
+    Ok(ok(json!({
+        "kicked": true,
+        "mac": mac,
+        "wifi_deauth": wifi_deauth,
+        "conntrack_flushed": conntrack_flushed,
+    })))
+}
+
 // ---------------- AI token management ----------------
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Value> {
