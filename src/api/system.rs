@@ -72,7 +72,7 @@ pub async fn backup(State(state): State<AppState>) -> ApiResult<Response> {
     );
     h.insert(
         header::CONTENT_DISPOSITION,
-        "attachment; filename="routerd-backup.tar.gz"".parse().unwrap(),
+        "attachment; filename=\"routerd-backup.tar.gz\"".parse().unwrap(),
     );
     Ok(resp)
 }
@@ -182,6 +182,14 @@ pub async fn logs(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> Ap
     Ok(ok(json!({"log": text, "lines": text.lines().count()})))
 }
 
+pub fn compute_kbps(prev_bytes: u64, cur_bytes: u64, elapsed_secs: f64) -> u64 {
+    if elapsed_secs <= 0.0 || cur_bytes < prev_bytes {
+        return 0;
+    }
+    let delta = (cur_bytes - prev_bytes) as f64;
+    ((delta * 8.0) / elapsed_secs / 1000.0).round() as u64
+}
+
 pub async fn events(
     State(state): State<AppState>,
 ) -> axum::response::sse::Sse<
@@ -190,7 +198,15 @@ pub async fn events(
     use axum::response::sse::{Event, KeepAlive};
     use futures_util::stream;
 
-    let stream = stream::unfold(state, |st| async move {
+    let init_sb = state.singbox.status();
+    let init = (
+        state,
+        init_sb.tx_bytes,
+        init_sb.rx_bytes,
+        std::time::Instant::now(),
+    );
+
+    let stream = stream::unfold(init, |(st, prev_tx, prev_rx, prev_at)| async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let sample = {
             let h = st.history.read().unwrap_or_else(|e| e.into_inner());
@@ -201,6 +217,12 @@ pub async fn events(
             acc.summary()["pending"].as_u64().unwrap_or(0)
         };
         let uptime = sys::human_duration(sys::uptime_secs());
+        let sb = st.singbox.status();
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(prev_at).as_secs_f64();
+        let sb_tx_kbps = compute_kbps(prev_tx, sb.tx_bytes, elapsed);
+        let sb_rx_kbps = compute_kbps(prev_rx, sb.rx_bytes, elapsed);
+
         let payload = json!({
             "cpu": sample.cpu,
             "mem": sample.mem,
@@ -208,10 +230,35 @@ pub async fn events(
             "tx_kbps": sample.tx,
             "uptime": uptime,
             "pending_devices": pending,
+            "singbox": {
+                "running": sb.running,
+                "enabled": sb.enabled,
+                "active_connections": sb.active_connections,
+                "total_connections": sb.total_connections,
+                "tx_bytes": sb.tx_bytes,
+                "rx_bytes": sb.rx_bytes,
+                "tx_kbps": sb_tx_kbps,
+                "rx_kbps": sb_rx_kbps,
+                "uptime_secs": sb.uptime_secs,
+                "last_error": sb.last_error,
+            },
         });
         let ev = Event::default().event("telemetry").data(payload.to_string());
-        Some((Ok(ev), st))
+        Some((Ok(ev), (st, sb.tx_bytes, sb.rx_bytes, now)))
     });
 
     axum::response::sse::Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_kbps_handles_normal_and_reset() {
+        // 250_000 bytes in 2s = 1_000_000 bits/s = 1000 kbps
+        assert_eq!(compute_kbps(100_000, 350_000, 2.0), 1000);
+        // Counter reset after core reload
+        assert_eq!(compute_kbps(500_000, 100, 2.0), 0);
+    }
 }

@@ -142,6 +142,22 @@ impl DeviceStore {
         Ok(())
     }
 
+    /// Look up the device MAC address currently associated with `ip` (preferring online devices).
+    pub fn mac_by_ip(&self, ip: &str) -> Option<&str> {
+        let mut fallback = None;
+        for d in self.devices.values() {
+            if d.ip == ip {
+                if d.online {
+                    return Some(&d.mac);
+                }
+                if fallback.is_none() {
+                    fallback = Some(d.mac.as_str());
+                }
+            }
+        }
+        fallback
+    }
+
     /// Merge DHCP leases and ARP into the store. Online flags are runtime-only.
     /// Returns true when persistent state changed.
     pub fn scan(&mut self) -> bool {

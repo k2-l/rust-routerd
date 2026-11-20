@@ -4,6 +4,7 @@ pub mod auth;
 pub mod firewall;
 pub mod firmware;
 pub mod network;
+pub mod singbox;
 pub mod system;
 pub mod wireless;
 
@@ -17,7 +18,7 @@ use serde_json::{json, Value};
 use tower_http::compression::CompressionLayer;
 
 use crate::auth::{CurrentSession, Session};
-use crate::error::ApiError;
+pub use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 use crate::util;
 
@@ -97,7 +98,8 @@ fn check_mutation_policy(state: &AppState, method: &Method, path: &str) -> Resul
             path,
             "/api/system/password" | "/api/logout" | "/api/session"
         ) || path.starts_with("/api/access")
-            || path.starts_with("/api/agents");
+            || path.starts_with("/api/agents")
+            || path.starts_with("/api/singbox");
 
         if !allowed_in_sim {
             return Err(ApiError::Forbidden(
@@ -194,6 +196,12 @@ fn protected_router(state: AppState) -> Router {
             get(access::list_agents).post(access::create_agent),
         )
         .route("/api/agents/{id}", delete(access::delete_agent))
+        .route("/api/singbox", get(singbox::get).put(singbox::update))
+        .route("/api/singbox/toggle", post(singbox::toggle))
+        .route("/api/singbox/restart", post(singbox::restart))
+        .route("/api/singbox/test", post(singbox::test))
+        .route("/api/singbox/test-all", post(singbox::test_all))
+        .route("/api/singbox/device-policy", post(singbox::set_device_policy))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
 }

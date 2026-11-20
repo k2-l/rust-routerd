@@ -29,6 +29,7 @@ libc = "0.2"
 
 openssl = "0.10"
 tokio-openssl = "0.6"
+blake3 = "1"
 
 rust-embed = "8"
 mime_guess = "2"

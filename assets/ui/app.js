@@ -11,6 +11,7 @@ const ICON = {
   wireless: `<svg ${SVG_ATTR}><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1"/><path d="M2 9a15 15 0 0 1 20 0"/></svg>`,
   clients: `<svg ${SVG_ATTR}><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c0-3.2 2.5-5.5 5.5-5.5s5.5 2.3 5.5 5.5"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.6c2.6.3 4.5 2.4 4.5 5.4"/></svg>`,
   firewall: `<svg ${SVG_ATTR}><path d="M12 3l7 3v5c0 4.6-2.9 8.3-7 10-4.1-1.7-7-5.4-7-10V6l7-3z"/><path d="M9.5 12l1.8 1.8 3.4-3.6"/></svg>`,
+  singbox: `<svg ${SVG_ATTR}><path d="M12 2l8 4.5v11L12 22l-8-4.5v-11L12 2z"/><path d="M12 22V12M20 6.5L12 12 4 6.5"/></svg>`,
   access: `<svg ${SVG_ATTR}><path d="M12 3l7 3v5c0 4.6-2.9 8.3-7 10-4.1-1.7-7-5.4-7-10V6l7-3z"/><circle cx="12" cy="10.5" r="2.2"/><path d="M12 12.7v3.3"/></svg>`,
   system: `<svg ${SVG_ATTR}><rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9.5 9.5h5v5h-5z"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>`,
   logs: `<svg ${SVG_ATTR}><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l2.5 3L7 15M12 15h5"/></svg>`,
@@ -36,6 +37,7 @@ const VIEWS = {
   clients:  { label: '终端管理', title: '终端管理', sub: '全网在线设备、信号质量与 DHCP 租约', icon: 'clients', render: renderClients },
   access:   { label: '安全管控', title: '安全管控', sub: '零信任设备准入与 AI Agent 令牌', icon: 'access', render: renderAccess },
   firewall: { label: '端口转发', title: '端口转发', sub: 'NAT 端口映射与防火墙区域策略', icon: 'firewall', render: renderFirewall },
+  singbox:  { label: '代理核心', title: 'Sing-box 代理核心', sub: '内置透明代理、多协议出站与智能分流引擎', icon: 'singbox', render: renderSingbox },
   system:   { label: '系统固件', title: '系统固件', sub: '硬件详情、密码安全与 sysupgrade 刷机', icon: 'system', render: renderSystem },
   logs:     { label: '内核日志', title: '内核日志', sub: '系统与网络守护进程实时输出', icon: 'logs', render: renderLogs },
 };
@@ -932,6 +934,447 @@ async function renderFirewall() {
             await api('/api/firewall/redirects', { method: 'POST', body: { name: f.get('name'), proto: f.get('proto'), src_dport: f.get('src_dport'), dest_ip: f.get('dest_ip'), dest_port: f.get('dest_port') } });
             close(); toast('端口转发已创建'); go('firewall');
           } catch (ex) { handleErr(ex); }
+        };
+      },
+    }
+  );
+}
+
+async function renderSingbox() {
+  const data = await api('/api/singbox');
+  const st = data.status || {};
+  const cfg = data.config || {};
+  const outbounds = cfg.outbounds || [];
+  const rules = (cfg.route && cfg.route.rules) || [];
+  const finalOb = (cfg.route && cfg.route.final) || 'direct';
+
+  const saveConfig = async (nextCfg, msg) => {
+    await api('/api/singbox', { method: 'PUT', body: nextCfg });
+    toast(msg || 'Sing-box 配置已保存并热重载');
+    go('singbox');
+  };
+
+  const obRows = outbounds.map((ob, idx) => {
+    const isBuiltin = ob.type === 'direct' || ob.type === 'block';
+    const addr = isBuiltin ? '内置出站' : `${ob.server || ''}:${ob.server_port || ''}`;
+    let sec = '—';
+    if (ob.tls && ob.tls.enabled) {
+      sec = (ob.tls.reality && ob.tls.reality.enabled) ? '<span class="badge ok">Reality</span>' : '<span class="badge">TLS</span>';
+    } else if (ob.type === 'shadowsocks') {
+      sec = `<span class="badge">${esc(ob.method || '')}</span>`;
+    }
+    return `<tr>
+      <td><b>${esc(ob.tag)}</b></td>
+      <td><span class="badge">${esc(ob.type)}</span></td>
+      <td class="mono">${esc(addr)}</td>
+      <td>${sec}</td>
+      <td class="mono" id="sb-lat-${esc(ob.tag)}">—</td>
+      <td class="right">
+        ${isBuiltin ? '' : `<button class="btn btn-sm" data-sb-test="${esc(ob.tag)}">测速</button>
+        <button class="btn btn-sm btn-danger" data-sb-del-ob="${idx}">${icon('trash')}</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+
+  const ruleSummary = (r) => {
+    const parts = [];
+    if (r.network && r.network.length) parts.push(`net:${r.network.join(',')}`);
+    if (r.src_mac && r.src_mac.length) parts.push(`mac:${r.src_mac.join(',')}`);
+    if (r.src_ip_cidr && r.src_ip_cidr.length) parts.push(`src:${r.src_ip_cidr.join(',')}`);
+    if (r.ip_cidr && r.ip_cidr.length) parts.push(`ip:${r.ip_cidr.join(',')}`);
+    if (r.domain_exact && r.domain_exact.length) parts.push(`exact:${r.domain_exact.join(',')}`);
+    if (r.domain_suffix && r.domain_suffix.length) parts.push(`suffix:${r.domain_suffix.join(',')}`);
+    if (r.domain_keyword && r.domain_keyword.length) parts.push(`kw:${r.domain_keyword.join(',')}`);
+    if (r.port && r.port.length) parts.push(`port:${r.port.join(',')}`);
+    return parts.join(' | ') || '（空规则）';
+  };
+
+  const ruleRows = rules.map((r, idx) => `<tr>
+    <td class="mono tiny">${esc(ruleSummary(r))}</td>
+    <td><span class="badge">${esc(r.outbound)}</span></td>
+    <td class="right"><button class="btn btn-sm btn-danger" data-sb-del-rule="${idx}">${icon('trash')}</button></td>
+  </tr>`).join('');
+
+  const obOptions = outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${ob.tag === finalOb ? 'selected' : ''}>${esc(ob.tag)} (${esc(ob.type)})</option>`).join('');
+
+  const devRows = (data.devices || []).map((d) => {
+    const opts = [`<option value="default" ${!d.policy ? 'selected' : ''}>默认 (跟随全局)</option>`]
+      .concat(outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${d.policy === ob.tag ? 'selected' : ''}>${esc(ob.tag)}</option>`))
+      .join('');
+    return `<tr>
+      <td><b>${esc(d.name || '未知设备')}</b> <span class="badge ${d.online ? 'ok' : ''}">${d.online ? '在线' : '离线'}</span></td>
+      <td class="mono">${esc(d.ip || '—')}</td>
+      <td class="mono">${esc(d.mac)}</td>
+      <td class="right"><select class="btn btn-sm" data-sb-dev-mac="${esc(d.mac)}">${opts}</select></td>
+    </tr>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <div class="card">
+      <div class="row-between">
+        <div>
+          <div class="row gap-10">
+            <h2 style="margin:0;font-size:15px">核心运行状态</h2>
+            <span class="badge ${st.running ? 'ok' : ''}" id="sb-badge">${st.running ? '运行中' : '已停止'}</span>
+          </div>
+          <p class="muted tiny" style="margin:4px 0 0">内置 Rust 代理引擎 · OpenSSL 3.5 硬件加速 · TProxy + Mixed 入站</p>
+        </div>
+        <div class="row gap-8">
+          <button class="btn ${cfg.enabled ? 'btn-danger' : 'btn-primary'}" id="sb-toggle">${icon('power')}${cfg.enabled ? '停用核心' : '启用核心'}</button>
+          <button class="btn" id="sb-restart">${icon('refresh')}重启</button>
+        </div>
+      </div>
+      ${st.last_error ? `<div class="form-error mt-14">${esc(st.last_error)}</div>` : ''}
+      <div class="grid grid-4 mt-14">
+        <div class="stat"><div class="stat-label">活跃 / 累计连接</div><div class="stat-val" id="sb-conns">${esc(st.active_connections ?? 0)} / ${esc(st.total_connections ?? 0)}</div></div>
+        <div class="stat"><div class="stat-label">实时速率 (上/下)</div><div class="stat-val tiny" id="sb-rate">0 Kbps / 0 Kbps</div></div>
+        <div class="stat"><div class="stat-label">累计流量 (上/下)</div><div class="stat-val tiny" id="sb-traffic">${fmtBytes(st.tx_bytes)} / ${fmtBytes(st.rx_bytes)}</div></div>
+        <div class="stat"><div class="stat-label">运行时长</div><div class="stat-val tiny" id="sb-uptime">${st.running ? fmtUptime(st.uptime_secs) : '—'}</div></div>
+      </div>
+    </div>
+
+    <div class="card mt-14">
+      <div class="row-between">
+        <div><h2 style="margin:0;font-size:15px">出站节点</h2><p class="muted tiny" style="margin:4px 0 0">支持 Shadowsocks (2022) / Trojan / VLESS (TLS / Reality)</p></div>
+        <div class="row gap-8">
+          <button class="btn" id="sb-test-all">批量测速</button>
+          <button class="btn btn-primary" id="sb-add-ob">${icon('plus')}添加节点</button>
+        </div>
+      </div>
+      <div class="table-wrap mt-14"><table>
+        <thead><tr><th>标签</th><th>协议</th><th>服务器</th><th>加密 / 传输</th><th>延迟</th><th class="right">操作</th></tr></thead>
+        <tbody>${obRows || '<tr><td colspan="6" class="empty">暂无出站节点</td></tr>'}</tbody>
+      </table></div>
+    </div>
+
+    <div class="grid grid-2 mt-14">
+      <div class="card">
+        <div class="row-between">
+          <div><h2 style="margin:0;font-size:15px">分流规则</h2></div>
+          <button class="btn btn-sm btn-primary" id="sb-add-rule">${icon('plus')}添加规则</button>
+        </div>
+        <div class="table-wrap mt-14"><table>
+          <thead><tr><th>匹配条件</th><th>目标出站</th><th class="right">删除</th></tr></thead>
+          <tbody>${ruleRows || '<tr><td colspan="3" class="empty">暂无自定义规则</td></tr>'}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><h2>全局路由与内核参数</h2></div>
+        <form id="sb-global-form">
+          <label class="field"><span>默认兜底出站 (final)</span><select name="final">${obOptions}</select></label>
+          <div class="field-row">
+            <label class="field"><span>日志级别</span><select name="log_level">
+              ${['trace', 'debug', 'info', 'warn', 'error'].map((l) => `<option value="${l}" ${cfg.log_level === l ? 'selected' : ''}>${l}</option>`).join('')}
+            </select></label>
+            <label class="field"><span>SO_MARK (fwmark)</span><input name="fwmark" type="number" min="1" value="${esc(cfg.fwmark ?? 256)}" required></label>
+            <label class="field"><span>策略路由表 ID</span><input name="route_table" type="number" min="1" value="${esc(cfg.route_table ?? 100)}" required></label>
+          </div>
+          <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}保存全局设置</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="grid grid-2 mt-14">
+      <div class="card">
+        <div class="row-between">
+          <div><h2 style="margin:0;font-size:15px">终端 MAC 分流策略</h2><p class="muted tiny" style="margin:4px 0 0">联动 routerd 终端表，为指定设备单独指定直连 / 代理 / 拦截出站</p></div>
+        </div>
+        <div class="table-wrap mt-14"><table>
+          <thead><tr><th>终端名称</th><th>IP</th><th>MAC 地址</th><th class="right">出站策略</th></tr></thead>
+          <tbody>${devRows || '<tr><td colspan="4" class="empty">暂无已发现终端</td></tr>'}</tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><h2>内置 DNS 分流与 FakeIP</h2></div>
+        <form id="sb-dns-form">
+          <div class="field-row">
+            <label class="field"><span>启用内置 DNS</span><select name="dns_enabled">
+              <option value="0" ${!(cfg.dns && cfg.dns.enabled) ? 'selected' : ''}>停用</option>
+              <option value="1" ${(cfg.dns && cfg.dns.enabled) ? 'selected' : ''}>启用</option>
+            </select></label>
+            <label class="field"><span>监听地址</span><input name="dns_listen" value="${esc((cfg.dns && cfg.dns.listen) || '127.0.0.1:7853')}" required></label>
+          </div>
+          <div class="field-row">
+            <label class="field"><span>直连 DNS 上游</span><input name="direct_upstream" value="${esc((cfg.dns && cfg.dns.direct_upstream) || '223.5.5.5:53')}" required></label>
+            <label class="field"><span>代理 DNS 上游</span><input name="proxy_upstream" value="${esc((cfg.dns && cfg.dns.proxy_upstream) || '8.8.8.8:53')}" required></label>
+          </div>
+          <div class="field-row">
+            <label class="field"><span>FakeIP 模式</span><select name="fakeip_enabled">
+              <option value="0" ${!(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>关闭 (代理隧道解析)</option>
+              <option value="1" ${(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>开启 (198.18.0.0/15)</option>
+            </select></label>
+            <label class="field"><span>联动 dnsmasq-full</span><select name="link_dnsmasq">
+              <option value="0" ${!(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>否</option>
+              <option value="1" ${(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>是 (自动接管上游)</option>
+            </select></label>
+          </div>
+          <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}保存 DNS 设置</button></div>
+        </form>
+      </div>
+    </div>`;
+
+  $('#sb-toggle').onclick = async () => {
+    try {
+      await api('/api/singbox/toggle', { method: 'POST', body: { enabled: !cfg.enabled } });
+      toast(cfg.enabled ? 'Sing-box 已停用' : 'Sing-box 已启用');
+      go('singbox');
+    } catch (e) { handleErr(e); }
+  };
+
+  $('#sb-restart').onclick = async () => {
+    try {
+      await api('/api/singbox/restart', { method: 'POST' });
+      toast('Sing-box 已重启');
+      go('singbox');
+    } catch (e) { handleErr(e); }
+  };
+
+  if (typeof EventSource !== 'undefined') {
+    const es = new EventSource('/api/events', { withCredentials: true });
+    state.sse = es;
+    es.addEventListener('telemetry', (ev) => {
+      if (state.view !== 'singbox') return;
+      try {
+        const p = JSON.parse(ev.data);
+        const sb = p.singbox;
+        if (!sb) return;
+        const badge = $('#sb-badge');
+        if (badge) {
+          badge.textContent = sb.running ? '运行中' : '已停止';
+          badge.classList.toggle('ok', !!sb.running);
+        }
+        const conns = $('#sb-conns');
+        if (conns) conns.textContent = `${sb.active_connections} / ${sb.total_connections}`;
+        const rate = $('#sb-rate');
+        if (rate) rate.textContent = `${fmtRate(sb.tx_kbps)} / ${fmtRate(sb.rx_kbps)}`;
+        const traf = $('#sb-traffic');
+        if (traf) traf.textContent = `${fmtBytes(sb.tx_bytes)} / ${fmtBytes(sb.rx_bytes)}`;
+        const up = $('#sb-uptime');
+        if (up) up.textContent = sb.running ? fmtUptime(sb.uptime_secs) : '—';
+      } catch (_) {}
+    });
+  }
+
+  $$('[data-sb-test]').forEach((b) => {
+    b.onclick = async () => {
+      const tag = b.dataset.sbTest;
+      const cell = $(`#sb-lat-${CSS.escape(tag)}`);
+      if (cell) cell.textContent = '测速中…';
+      try {
+        const res = await api('/api/singbox/test', { method: 'POST', body: { outbound: tag } });
+        if (cell) cell.innerHTML = `<span class="badge ok">${esc(res.latency_ms)} ms</span>`;
+      } catch (e) {
+        if (cell) cell.innerHTML = `<span class="badge bad">失败</span>`;
+        handleErr(e);
+      }
+    };
+  });
+
+  $('#sb-test-all').onclick = async () => {
+    try {
+      const res = await api('/api/singbox/test-all', { method: 'POST', body: {} });
+      (res.results || []).forEach((r) => {
+        const cell = $(`#sb-lat-${CSS.escape(r.outbound)}`);
+        if (!cell) return;
+        cell.innerHTML = r.latency_ms != null
+          ? `<span class="badge ok">${esc(r.latency_ms)} ms</span>`
+          : `<span class="badge bad" title="${esc(r.error || '')}">超时/失败</span>`;
+      });
+      toast('批量测速完成');
+    } catch (e) { handleErr(e); }
+  };
+
+  $$('[data-sb-del-ob]').forEach((b) => {
+    b.onclick = async () => {
+      const idx = Number(b.dataset.sbDelOb);
+      const next = structuredClone(cfg);
+      next.outbounds.splice(idx, 1);
+      try { await saveConfig(next, '节点已删除'); } catch (e) { handleErr(e); }
+    };
+  });
+
+  $$('[data-sb-del-rule]').forEach((b) => {
+    b.onclick = async () => {
+      const idx = Number(b.dataset.sbDelRule);
+      const next = structuredClone(cfg);
+      next.route.rules.splice(idx, 1);
+      try { await saveConfig(next, '规则已删除'); } catch (e) { handleErr(e); }
+    };
+  });
+
+  $$('[data-sb-dev-mac]').forEach((sel) => {
+    sel.onchange = async () => {
+      try {
+        await api('/api/singbox/device-policy', {
+          method: 'POST',
+          body: { mac: sel.dataset.sbDevMac, outbound: sel.value },
+        });
+        toast('终端分流策略已更新');
+        go('singbox');
+      } catch (e) { handleErr(e); }
+    };
+  });
+
+  $('#sb-global-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const next = structuredClone(cfg);
+    next.route.final = f.get('final');
+    next.log_level = f.get('log_level');
+    next.fwmark = Number(f.get('fwmark'));
+    next.route_table = Number(f.get('route_table'));
+    try { await saveConfig(next, '全局路由设置已保存'); } catch (ex) { handleErr(ex); }
+  };
+
+  $('#sb-dns-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const next = structuredClone(cfg);
+    next.dns = next.dns || {};
+    next.dns.enabled = f.get('dns_enabled') === '1';
+    next.dns.listen = f.get('dns_listen').trim();
+    next.dns.direct_upstream = f.get('direct_upstream').trim();
+    next.dns.proxy_upstream = f.get('proxy_upstream').trim();
+    next.dns.link_dnsmasq = f.get('link_dnsmasq') === '1';
+    next.dns.fakeip = next.dns.fakeip || { inet4_range: '198.18.0.0/15', ttl: 60 };
+    next.dns.fakeip.enabled = f.get('fakeip_enabled') === '1';
+    try { await saveConfig(next, 'DNS 与 FakeIP 设置已保存'); } catch (ex) { handleErr(ex); }
+  };
+
+  $('#sb-add-ob').onclick = () => openModal(
+    `<h3>添加出站节点</h3>
+     <form id="sb-ob-f">
+       <div class="field-row">
+         <label class="field"><span>节点标签</span><input name="tag" placeholder="hk-1" required></label>
+         <label class="field"><span>协议类型</span><select name="type" id="sb-ob-type">
+           <option value="vless">VLESS</option>
+           <option value="trojan">Trojan</option>
+           <option value="shadowsocks">Shadowsocks</option>
+         </select></label>
+       </div>
+       <div class="field-row">
+         <label class="field"><span>服务器地址</span><input name="server" placeholder="example.com" required></label>
+         <label class="field"><span>端口</span><input name="server_port" type="number" min="1" max="65535" value="443" required></label>
+       </div>
+       <div id="sb-ss-fields" class="hidden">
+         <div class="field-row">
+           <label class="field"><span>加密方式</span><select name="method">
+             <option value="aes-128-gcm">aes-128-gcm</option>
+             <option value="aes-256-gcm">aes-256-gcm</option>
+             <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+             <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option>
+             <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
+             <option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option>
+           </select></label>
+           <label class="field"><span>密码</span><input name="ss_password"></label>
+         </div>
+       </div>
+       <div id="sb-cred-field">
+         <div class="field-row">
+           <label class="field"><span id="sb-cred-label">UUID</span><input name="cred" placeholder="UUID 或密码"></label>
+           <label class="field" id="sb-flow-field"><span>流控 (VLESS Flow)</span><select name="flow">
+             <option value="">无</option>
+             <option value="xtls-rprx-vision">xtls-rprx-vision</option>
+           </select></label>
+         </div>
+       </div>
+       <div id="sb-tls-fields">
+         <div class="field-row">
+           <label class="field"><span>启用 TLS</span><select name="tls_enabled"><option value="1">是</option><option value="0">否</option></select></label>
+           <label class="field"><span>跳过证书校验 (insecure)</span><select name="insecure"><option value="0">否 (推荐)</option><option value="1">是</option></select></label>
+         </div>
+         <label class="field"><span>SNI (server_name)</span><input name="sni" placeholder="example.com"></label>
+         <div class="field-row">
+           <label class="field"><span>Reality Public Key (可选)</span><input name="reality_pk" placeholder="留空则使用普通 TLS"></label>
+           <label class="field"><span>Reality Short ID</span><input name="reality_sid" placeholder="可选"></label>
+         </div>
+       </div>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">添加</button></div>
+     </form>`,
+    {
+      onMount(el, close) {
+        const typeSel = el.querySelector('#sb-ob-type');
+        const syncFields = () => {
+          const t = typeSel.value;
+          el.querySelector('#sb-ss-fields').classList.toggle('hidden', t !== 'shadowsocks');
+          el.querySelector('#sb-cred-field').classList.toggle('hidden', t === 'shadowsocks');
+          el.querySelector('#sb-flow-field').classList.toggle('hidden', t !== 'vless');
+          el.querySelector('#sb-tls-fields').classList.toggle('hidden', t === 'shadowsocks');
+          el.querySelector('#sb-cred-label').textContent = t === 'vless' ? 'UUID' : 'Trojan 密码';
+        };
+        typeSel.onchange = syncFields;
+        syncFields();
+        el.querySelector('[data-cancel]').onclick = close;
+        el.querySelector('#sb-ob-f').onsubmit = async (e) => {
+          e.preventDefault();
+          const f = new FormData(e.target);
+          const t = f.get('type');
+          let ob;
+          if (t === 'shadowsocks') {
+            ob = {
+              type: 'shadowsocks',
+              tag: f.get('tag').trim(),
+              server: f.get('server').trim(),
+              server_port: Number(f.get('server_port')),
+              method: f.get('method'),
+              password: f.get('ss_password'),
+            };
+          } else {
+            const pk = f.get('reality_pk').trim();
+            const tls = {
+              enabled: f.get('tls_enabled') === '1',
+              server_name: f.get('sni').trim() || null,
+              insecure: f.get('insecure') === '1',
+              alpn: [],
+              reality: pk ? { enabled: true, public_key: pk, short_id: f.get('reality_sid').trim() } : null,
+            };
+            ob = t === 'vless'
+              ? { type: 'vless', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), uuid: f.get('cred').trim(), flow: f.get('flow') || '', tls }
+              : { type: 'trojan', tag: f.get('tag').trim(), server: f.get('server').trim(), server_port: Number(f.get('server_port')), password: f.get('cred'), tls };
+          }
+          const next = structuredClone(cfg);
+          next.outbounds.push(ob);
+          try { await saveConfig(next, '出站节点已添加'); close(); } catch (ex) { handleErr(ex); }
+        };
+      },
+    }
+  );
+
+  $('#sb-add-rule').onclick = () => openModal(
+    `<h3>添加分流规则</h3>
+     <form id="sb-rule-f">
+       <label class="field"><span>目标出站</span><select name="outbound">${outbounds.map((ob) => `<option value="${esc(ob.tag)}">${esc(ob.tag)}</option>`).join('')}</select></label>
+       <label class="field"><span>域名后缀 (逗号分隔)</span><input name="domain_suffix" placeholder="cn, baidu.com"></label>
+       <label class="field"><span>目标 IP CIDR (逗号分隔)</span><input name="ip_cidr" placeholder="192.168.0.0/16, 10.0.0.0/8"></label>
+       <div class="field-row">
+         <label class="field"><span>源 IP CIDR</span><input name="src_ip_cidr" placeholder="192.168.1.100/32"></label>
+         <label class="field"><span>目标端口</span><input name="port" placeholder="53, 443"></label>
+       </div>
+       <label class="field"><span>传输协议 (tcp / udp)</span><input name="network" placeholder="udp"></label>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">添加</button></div>
+     </form>`,
+    {
+      onMount(el, close) {
+        const splitCsv = (s) => (s || '').split(',').map((v) => v.trim()).filter(Boolean);
+        el.querySelector('[data-cancel]').onclick = close;
+        el.querySelector('#sb-rule-f').onsubmit = async (e) => {
+          e.preventDefault();
+          const f = new FormData(e.target);
+          const rule = {
+            ip_cidr: splitCsv(f.get('ip_cidr')),
+            src_ip_cidr: splitCsv(f.get('src_ip_cidr')),
+            domain_suffix: splitCsv(f.get('domain_suffix')),
+            domain_exact: [],
+            domain_keyword: [],
+            port: splitCsv(f.get('port')).map((p) => Number(p)).filter((p) => p > 0 && p <= 65535),
+            network: splitCsv(f.get('network')),
+            outbound: f.get('outbound'),
+          };
+          const next = structuredClone(cfg);
+          next.route.rules.push(rule);
+          try { await saveConfig(next, '分流规则已添加'); close(); } catch (ex) { handleErr(ex); }
         };
       },
     }

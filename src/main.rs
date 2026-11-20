@@ -4,6 +4,7 @@ mod assets;
 mod auth;
 mod error;
 mod openwrt;
+mod singbox;
 mod state;
 mod tls;
 mod util;
@@ -198,6 +199,12 @@ async fn main() {
     let tls_active = tls_acceptor.is_some();
 
     let state = AppState::new(args.data_dir.clone(), tls_active, args.sim);
+    {
+        let sb = state.singbox.clone();
+        tokio::spawn(async move {
+            sb.bootstrap().await;
+        });
+    }
     openwrt::sys::spawn_sampler(state.history.clone());
     {
         let sessions = state.sessions.clone();
@@ -312,6 +319,7 @@ async fn main() {
     }
 
     tracing::info!("shutting down");
+    state.singbox.stop().await;
     let _ = tx.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     for t in tasks {
