@@ -6,7 +6,6 @@ use anyhow::Result;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::util;
 
@@ -77,9 +76,7 @@ pub fn can_write(scopes: &[String]) -> bool {
 }
 
 fn sha256_hex(data: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data.as_bytes());
-    hex::encode(hasher.finalize())
+    hex::encode(openssl::sha::sha256(data.as_bytes()))
 }
 
 impl TokenStore {

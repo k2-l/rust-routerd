@@ -4,7 +4,6 @@ use std::sync::OnceLock;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use sha2::{Digest, Sha256};
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "assets/ui"]
@@ -26,9 +25,7 @@ fn etags() -> &'static HashMap<String, String> {
         let mut map = HashMap::new();
         for path in Ui::iter() {
             if let Some(file) = Ui::get(&path) {
-                let mut hasher = Sha256::new();
-                hasher.update(&file.data);
-                let digest = hasher.finalize();
+                let digest = openssl::sha::sha256(&file.data);
                 map.insert(
                     path.to_string(),
                     format!("\"{}\"", hex::encode(&digest[..8])),

@@ -33,7 +33,8 @@ check() { if eval "$2"; then echo "  OK   $1"; else echo "  FAIL $1"; fail=1; fi
 echo
 echo "== routerd =="
 check "binary present + executable" "[ -x '$R/usr/sbin/routerd' ]"
-check "binary is static aarch64" "file '$R/usr/sbin/routerd' | grep -q 'ARM aarch64.*statically linked'"
+check "binary is dynamic aarch64 (musl)" "file '$R/usr/sbin/routerd' | grep -q 'ARM aarch64.*dynamically linked'"
+check "links system OpenSSL 3.5" "readelf -d '$R/usr/sbin/routerd' 2>/dev/null | grep -q 'libssl.so.3' || grep -aq 'libssl.so.3' '$R/usr/sbin/routerd'"
 check "init script" "[ -x '$R/etc/init.d/routerd' ]"
 check "uci config" "[ -f '$R/etc/config/routerd' ]"
 check "first-boot defaults" "[ -x '$R/etc/uci-defaults/99-routerd' ]"
@@ -51,7 +52,7 @@ check "apk database present" "[ -f '$R/lib/apk/db/installed' ]"
 
 echo
 echo "== required runtime packages (ImmortalWrt 25.12 apk) =="
-for p in apk-mbedtls rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
+for p in apk-mbedtls libopenssl3 rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack; do
 	check "package $p" "grep -q '^P:$p\$' '$R/lib/apk/db/installed'"
 done
 

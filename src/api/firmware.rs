@@ -2,7 +2,7 @@ use axum::extract::{Multipart, State};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use openssl::sha::Sha256;
 use tokio::io::AsyncWriteExt;
 
 use super::{ok, ApiError, ApiResult};
@@ -96,7 +96,7 @@ pub async fn upload(mut multipart: Multipart) -> ApiResult<Json<Value>> {
         return Err(ApiError::bad("不是有效的 OpenWrt sysupgrade 固件"));
     }
 
-    let sha = hex::encode(hasher.finalize());
+    let sha = hex::encode(hasher.finish());
     tracing::info!("firmware uploaded: {size} bytes sha256={sha}");
     Ok(ok(json!({
         "size": size,

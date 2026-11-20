@@ -18,7 +18,9 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Semaphore};
-use tokio_rustls::TlsAcceptor;
+use std::pin::Pin;
+use openssl::ssl::{Ssl, SslAcceptor};
+use tokio_openssl::SslStream;
 use tracing_subscriber::EnvFilter;
 
 use crate::state::{AppState, PeerAddr};
@@ -96,7 +98,7 @@ async fn serve_plain(
 
 async fn serve_tls(
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    acceptor: Arc<SslAcceptor>,
     app: Router,
     permits: Arc<Semaphore>,
     mut shutdown: watch::Receiver<bool>,
@@ -111,13 +113,27 @@ async fn serve_tls(
                 let app = app.clone().layer(Extension(PeerAddr(peer.ip())));
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let tls = match tokio::time::timeout(
+                    let ssl = match Ssl::new(acceptor.context()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!("ssl session init failed from {peer}: {e}");
+                            return;
+                        }
+                    };
+                    let mut tls = match SslStream::new(ssl, stream) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!("ssl stream wrap failed from {peer}: {e}");
+                            return;
+                        }
+                    };
+                    match tokio::time::timeout(
                         Duration::from_secs(10),
-                        acceptor.accept(stream),
+                        Pin::new(&mut tls).accept(),
                     )
                     .await
                     {
-                        Ok(Ok(t)) => t,
+                        Ok(Ok(())) => {}
                         Ok(Err(e)) => {
                             tracing::debug!("tls handshake failed from {peer}: {e}");
                             return;
@@ -126,7 +142,7 @@ async fn serve_tls(
                             tracing::debug!("tls handshake timed out from {peer}");
                             return;
                         }
-                    };
+                    }
                     let io = TokioIo::new(tls);
                     let service = TowerToHyperService::new(app);
                     let mut builder = auto::Builder::new(TokioExecutor::new());
@@ -142,11 +158,6 @@ async fn serve_tls(
     }
 }
 
-fn install_rustls() {
-    // rustls 0.23 requires an explicit process-level crypto provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
 #[tokio::main]
 async fn main() {
     let args = parse_args();
@@ -155,8 +166,6 @@ async fn main() {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
-
-    install_rustls();
     let _ = std::fs::create_dir_all(&args.data_dir);
 
     // Bind before building the app so the TLS state is final in AppState.
@@ -180,7 +189,7 @@ async fn main() {
     if https_listener.is_some() {
         match tls::load_or_generate(&args.data_dir, &openwrt::sys::hostname()) {
             Ok((cert, key)) => match tls::server_config(&cert, &key) {
-                Ok(cfg) => tls_acceptor = Some(TlsAcceptor::from(cfg)),
+                Ok(cfg) => tls_acceptor = Some(Arc::new(cfg)),
                 Err(e) => tracing::error!("TLS config failed: {e:#}"),
             },
             Err(e) => tracing::error!("certificate setup failed: {e:#}"),
