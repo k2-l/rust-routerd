@@ -1,12 +1,18 @@
 # routerd
 
-为 **Cudy TR3000 v1**（MT7981B / aarch64 / musl）定制的高性能路由器管理守护进程，基于 **ImmortalWrt 25.12** 固件体系打造，完全替代原厂 `uhttpd + LuCI` 管理栈。后端采用 Rust（`tokio` / `hyper` / `axum` / `rustls`）实现，全息拓扑单页前端直接内嵌编译进单一静态二进制文件。
+为 **Cudy TR3000 v1**（MT7981B / aarch64 / musl）定制的高性能路由器管理守护进程，基于 **ImmortalWrt 25.12** 固件体系打造，集成管理控制台与内置 Rust 代理核心。后端采用 Rust（`tokio` / `hyper` / `axum` / `tokio-openssl`）实现并动态链接固件 OpenSSL 3.5，全息拓扑单页前端通过 `rust-embed` 直接内嵌编译进单一二进制文件。
 
 ## 核心特性
 
-- **双栈协议与安全传输**：原生支持 HTTP/1.1 + HTTP/2 + HTTPS（TLS 1.2/1.3，`rustls` + `ring`），HTTP 80 端口自动 `308 Permanent Redirect` 跳转至 HTTPS 443；首次启动自动生成包含常用内网管理 IP SAN 的 P-256 自签名证书并持久化至 `/etc/routerd/`。
+- **双栈协议与安全传输**：原生支持 HTTP/1.1 + HTTP/2 + HTTPS（TLS 1.2/1.3，系统 OpenSSL 3.5），HTTP 80 端口自动 `308 Permanent Redirect` 跳转至 HTTPS 443；首次启动自动生成包含常用内网管理 IP SAN 的 P-256 自签名证书并持久化至 `/etc/routerd/`。
 - **鉴权与安全加固**：直接校验 `/etc/shadow`（`crypt(3)`，支持 `$1$/$5$/$6$`），Cookie + Header 双重 CSRF 防护、IP 级登录失败滑动限速、TLS 握手 10 秒超时熔断与 `RwLock` 抗中毒保护。
-- **实时遥测与全息总览（SSE）**：通过 `GET /api/events`（`text/event-stream`）每 2 秒主动推送 CPU、内存、上下行实时吞吐及待授权设备数；展示 WAN → 路由核心 → 终端拓扑、物理网口速率指示灯与 PPE 硬件加速状态。
+- **实时遥测与全息总览（SSE）**：通过 `GET /api/events`（`text/event-stream`）每 2 秒主动推送 CPU、内存、上下行实时吞吐、待授权设备数及 `singbox` 代理实时速率/连接数；展示 WAN → 路由核心 → 终端拓扑、物理网口速率指示灯与 PPE 硬件加速状态。
+- **内置 Sing-box 代理核心（`src/singbox/`）**：
+  - **入站与透明劫持**：支持 Mixed 单端口协议探测（HTTP CONNECT / 明文 HTTP / SOCKS5）与 TProxy TCP/UDP 透明代理（`IP_TRANSPARENT`、`IP_RECVORIGDSTADDR` UDP NAT 会话表与空闲回收），全出站统一绑定 `SO_MARK`（默认 `0x100`）防回环，自动注入 `fw4` `nftables` `prerouting mangle` 规则与 `ip rule` / `ip route local` 策略路由；
+  - **多协议出站**：支持 `Direct` / `Block`、Shadowsocks AEAD 与 2022（`aes-128/256-gcm`、`chacha20-ietf-poly1305`、`2022-blake3-*` TCP/UDP）、Trojan（SHA-224 认证 + TLS TCP/UDP-over-TCP）与 VLESS（v0 帧编码、XTLS-Vision `xtls-rprx-vision` 流控、OpenSSL 3.5 TLS 与 Reality X25519 伪装握手）；
+  - **内存分流、嗅探与终端联动**：支持 IPv4/IPv6 CIDR、O(1) 域名精确/后缀/关键词、端口、传输协议与 `routerd` 终端表 MAC 策略联动分流；支持 TProxy 首包 TLS SNI / HTTP Host 嗅探；
+  - **内置 DNS 分流与防泄漏**：区分直连与代理 DNS 上游，支持可选 FakeIP（`198.18.0.0/15`）及 ImmortalWrt `dnsmasq-full` 上游自动联动；
+  - **热重载与 Web 控制面板**：配置预校验后通过 `watch` 信号无缝切换实例并优雅排空旧连接；提供 `/api/singbox*` 管理接口与 Web 控制台「代理核心」页面（状态监控、节点管理与测速、分流规则、DNS/FakeIP 与单设备 MAC 策略）。
 - **上网设置与硬件端口调度**：
   - 支持 **路由模式 (NAT)** 与 **有线中继模式 (AP)** 一键切换；
   - 支持 **2.5G (`eth1`) / 1G (`eth0`) 物理网口角色一键互换**；
@@ -34,9 +40,9 @@ routerd/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs            # HTTP/HTTPS 监听、TLS 接入、后台采样与优雅退出
-│   ├── state.rs           # 全局共享状态（会话、采样历史、设备准入表、Agent 令牌）
+│   ├── state.rs           # 全局共享状态（会话、采样历史、设备准入表、Agent 令牌、SingboxManager）
 │   ├── auth.rs            # /etc/shadow 密码校验、crypt(3) 哈希与会话管理
-│   ├── tls.rs             # P-256 自签名证书生成与 rustls 配置
+│   ├── tls.rs             # P-256 自签名证书生成与 OpenSSL SslAcceptor 配置
 │   ├── assets.rs          # rust-embed 内嵌静态资源、ETag 与 CSP 安全头
 │   ├── error.rs           # 统一 REST API 错误码与响应映射
 │   ├── util.rs            # 原子写文件、UCI 解析与无 Shell 进程调用封装
@@ -44,6 +50,16 @@ routerd/
 │   │   ├── devices.rs
 │   │   ├── nft.rs
 │   │   └── agents.rs
+│   ├── singbox/           # 内置 Rust 代理核心（入站/出站/路由/嗅探/DNS/TProxy/热重载）
+│   │   ├── config.rs      # SingboxConfig / DnsConfig / FakeIpConfig 配置校验与持久化
+│   │   ├── crypto.rs      # OpenSSL 3.5 AEAD/AES-ECB/HKDF 与 HChaCha20/BLAKE3 密钥派生
+│   │   ├── dns.rs         # 内置 DNS 分流、FakeIP 池与 dnsmasq-full 联动
+│   │   ├── router.rs      # 内存路由引擎（CIDR/域名/端口/协议/MAC）
+│   │   ├── runtime.rs     # 实例生命周期管理、配置热重载与旧连接优雅排空
+│   │   ├── sniff.rs       # TLS SNI / HTTP Host 首包协议嗅探
+│   │   ├── tproxy.rs      # SO_MARK/IP_TRANSPARENT 封装、fw4 规则与策略路由同步
+│   │   ├── inbound/       # Mixed (HTTP CONNECT + SOCKS5) 与 TProxy TCP/UDP 入站
+│   │   └── outbound/      # Direct/Block、Shadowsocks(2022)、Trojan、VLESS(TLS/Vision/Reality)
 │   ├── api/               # REST API 路由与处理器
 │   │   ├── mod.rs         # 路由注册、会话/CSRF/演示模式策略中间件
 │   │   ├── auth.rs        # 登录、登出、会话查询与改密
@@ -52,15 +68,16 @@ routerd/
 │   │   ├── wireless.rs    # 无线射频/SSID 配置与在线终端列表
 │   │   ├── access.rs      # Web 端准入控制、单设备 QoS 限速与 Agent Token 管理
 │   │   ├── agent.rs       # 面向 AI Agent 的 /api/agent/v1/* 接口与 OpenAPI 规范
+│   │   ├── singbox.rs     # 代理配置读写、启停/重启、单节点/批量测速与终端策略
 │   │   ├── firewall.rs    # 防火墙区域与端口转发规则
 │   │   └── firmware.rs    # sysupgrade 固件上传校验与刷写
 │   └── openwrt/           # OpenWrt 底层系统适配层（uci/ubus/sys/net/wireless/firewall）
 ├── assets/ui/             # 内嵌单页前端（index.html / app.css / app.js）
 ├── packaging/files/       # 注入固件根文件系统的配置与初始化脚本
 └── scripts/
-    ├── build.sh           # 交叉编译静态 aarch64-unknown-linux-musl 二进制
+    ├── build.sh           # 交叉编译动态链接 OpenSSL 3.5 的 aarch64-unknown-linux-musl 二进制
     ├── build-image.sh     # 调用 ImmortalWrt 25.12 ImageBuilder 生成 sysupgrade 镜像
-    ├── verify-image.sh    # 校验固件体积预算、静态二进制与 25.12 apk 软件包清单
+    ├── verify-image.sh    # 校验固件体积预算（< 25 MiB）、动态库依赖与 25.12 apk 软件包清单
     └── run-sim.sh         # 基于 QEMU user-mode 的只读演示沙盒启动脚本
 ```
 
@@ -75,17 +92,17 @@ routerd/
 ### 编译与生成固件
 
 ```bash
-# 1. 编译静态 aarch64 二进制并安装至 packaging/files/usr/sbin/routerd
+# 1. 编译动态链接 OpenSSL 3.5 的 aarch64 二进制并安装至 packaging/files/usr/sbin/routerd
 ./scripts/build.sh
 
 # 2. 使用 ImmortalWrt 25.12 ImageBuilder 打包 sysupgrade 固件
 ./scripts/build-image.sh
 
-# 3. 校验固件体积（< 25 MiB）、rootfs 结构与 apk 依赖清单
+# 3. 校验固件体积（< 25 MiB，实测 25.12.2 约 15.64 MiB）、rootfs 结构与 apk 依赖清单
 ./scripts/verify-image.sh
 ```
 
-镜像打包脚本默认移除 `luci-*`、`uhttpd*`、`default-settings-chn`、`odhcp6c` 与 `odhcpd-ipv6only`，并预装 `ip-tiny`、`rpcd`、`rpcd-mod-iwinfo` 与 `conntrack`。
+镜像打包脚本默认移除 `luci-light`、`uhttpd*`、`default-settings-chn`、`odhcp6c` 与 `odhcpd-ipv6only`，并预装 `libopenssl3`、`ip-tiny`、`rpcd`、`rpcd-mod-iwinfo` 与 `conntrack`。
 
 ## 刷机与首次登录
 
