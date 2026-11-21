@@ -190,7 +190,7 @@ fn flush_unauthorized_conntrack(store: &DeviceStore) {
         let dev = a["device"].as_str().unwrap_or("");
         if !mac.is_empty()
             && !ip.is_empty()
-            && (dev.starts_with("br-") || dev.starts_with("lan") || dev.starts_with("eth"))
+            && crate::openwrt::net::is_lan_arp_device(dev)
             && !allowed.contains(&mac)
         {
             target_ips.insert(ip.to_string());

@@ -177,6 +177,29 @@ pub fn arp_table() -> Vec<Value> {
     out
 }
 
+/// Return true if `dev` is the router's LAN bridge/interface (excluding WAN such as `eth1` / `wan`).
+pub fn is_lan_arp_device(dev: &str) -> bool {
+    if dev.is_empty() {
+        return false;
+    }
+    let cfg = crate::openwrt::uci::load("network").unwrap_or_default();
+    let lan_dev = cfg
+        .section("lan")
+        .and_then(|s| s.get("device"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("br-lan");
+    let wan_dev = cfg
+        .section("wan")
+        .and_then(|s| s.get("device"))
+        .map(str::trim)
+        .unwrap_or("");
+    if !wan_dev.is_empty() && dev == wan_dev {
+        return false;
+    }
+    dev == lan_dev || dev.starts_with("br-") || dev == "lan"
+}
+
 pub fn leases() -> Vec<Value> {
     let text = util::read("/tmp/dhcp.leases");
     let mut out = Vec::new();

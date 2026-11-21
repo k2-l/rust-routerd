@@ -176,10 +176,18 @@ impl DeviceStore {
             let hostname = lease["hostname"].as_str().unwrap_or("").to_string();
             seen.insert(mac, (ip, hostname));
         }
+        let mut non_lan_macs: Vec<String> = Vec::new();
         for arp in net::arp_table() {
             let Some(mac) = arp["mac"].as_str().and_then(normalize_mac) else {
                 continue;
             };
+            let dev = arp["device"].as_str().unwrap_or("");
+            if !net::is_lan_arp_device(dev) {
+                if !seen.contains_key(&mac) {
+                    non_lan_macs.push(mac);
+                }
+                continue;
+            }
             let ip = arp["ip"].as_str().unwrap_or("").to_string();
             let entry = seen.entry(mac).or_default();
             if entry.0.is_empty() {
@@ -188,6 +196,14 @@ impl DeviceStore {
         }
 
         let mut changed = false;
+        for mac in non_lan_macs {
+            if let Some(d) = self.devices.get(&mac) {
+                if !d.authorized && !d.blocked {
+                    self.devices.remove(&mac);
+                    changed = true;
+                }
+            }
+        }
         for (mac, (ip, hostname)) in &seen {
             let device = self.devices.entry(mac.clone()).or_insert_with(|| {
                 changed = true;

@@ -208,7 +208,7 @@ pub fn clients() -> Vec<Value> {
             continue;
         }
         let dev = a["device"].as_str().unwrap_or("");
-        if !(dev.starts_with("br-") || dev.starts_with("eth") || dev.starts_with("lan")) {
+        if !crate::openwrt::net::is_lan_arp_device(dev) {
             continue;
         }
         // Filter out stale/unplugged ARP entries (flags == 0x0)

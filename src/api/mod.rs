@@ -236,8 +236,60 @@ fn agent_router(state: AppState) -> Router {
         .route("/api/agent/v1/devices/block", post(agent::block))
         .route("/api/agent/v1/devices/unblock", post(agent::unblock))
         .route("/api/agent/v1/devices/{mac}", get(agent::device))
+        .route("/api/agent/v1/devices/{mac}/limit", post(access::rate_limit))
+        .route("/api/agent/v1/devices/{mac}/kick", post(access::kick))
         .route("/api/agent/v1/enforcement", post(agent::enforcement))
         .route("/api/agent/v1/audit", get(agent::audit_log))
+        // 全路由器各模块接管（读/写）
+        .route("/api/agent/v1/system", get(system::info))
+        .route("/api/agent/v1/system/history", get(system::history))
+        .route("/api/agent/v1/system/hostname", put(system::set_hostname))
+        .route("/api/agent/v1/system/reboot", post(system::reboot))
+        .route("/api/agent/v1/logs", get(system::logs))
+        .route("/api/agent/v1/network", get(network::get))
+        .route("/api/agent/v1/network/mode", get(network::get_mode).put(network::set_mode))
+        .route("/api/agent/v1/network/hardware", get(network::hardware))
+        .route("/api/agent/v1/network/ports/swap", post(network::swap_ports))
+        .route("/api/agent/v1/network/diag", post(network::diag))
+        .route("/api/agent/v1/network/wan", put(network::update_wan))
+        .route("/api/agent/v1/network/wan/redial", post(network::redial))
+        .route("/api/agent/v1/network/wan/pppoe-log", get(network::pppoe_log))
+        .route("/api/agent/v1/network/lan", put(network::update_lan))
+        .route("/api/agent/v1/network/dhcp/hosts", post(network::add_static_lease))
+        .route(
+            "/api/agent/v1/network/dhcp/hosts/{section}",
+            put(network::update_static_lease).delete(network::delete_static_lease),
+        )
+        .route("/api/agent/v1/network/dns/domains", post(network::add_custom_host))
+        .route(
+            "/api/agent/v1/network/dns/domains/{section}",
+            put(network::update_custom_host).delete(network::delete_custom_host),
+        )
+        .route("/api/agent/v1/network/reload", post(network::reload))
+        .route("/api/agent/v1/wireless", get(wireless::get).put(wireless::update))
+        .route("/api/agent/v1/wireless/reload", post(wireless::reload))
+        .route("/api/agent/v1/clients", get(wireless::clients))
+        .route("/api/agent/v1/firewall", get(firewall::get))
+        .route("/api/agent/v1/firewall/redirects", post(firewall::add_redirect))
+        .route(
+            "/api/agent/v1/firewall/redirects/{section}",
+            delete(firewall::delete_redirect)
+                .put(firewall::update_redirect)
+                .patch(firewall::patch_redirect),
+        )
+        .route("/api/agent/v1/firewall/rules", post(firewall::add_rule))
+        .route(
+            "/api/agent/v1/firewall/rules/{section}",
+            delete(firewall::delete_rule)
+                .put(firewall::update_rule)
+                .patch(firewall::patch_rule),
+        )
+        .route("/api/agent/v1/singbox", get(singbox::get).put(singbox::update))
+        .route("/api/agent/v1/singbox/toggle", post(singbox::toggle))
+        .route("/api/agent/v1/singbox/restart", post(singbox::restart))
+        .route("/api/agent/v1/singbox/test", post(singbox::test))
+        .route("/api/agent/v1/singbox/test-all", post(singbox::test_all))
+        .route("/api/agent/v1/singbox/device-policy", post(singbox::set_device_policy))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             agent::require_agent,
