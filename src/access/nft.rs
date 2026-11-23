@@ -31,12 +31,6 @@ fn nft_bin() -> Option<&'static str> {
         .find(|path| std::path::Path::new(path).exists())
 }
 
-fn conntrack_bin() -> Option<&'static str> {
-    ["/usr/sbin/conntrack", "/sbin/conntrack", "/usr/bin/conntrack"]
-        .into_iter()
-        .find(|path| std::path::Path::new(path).exists())
-}
-
 fn lan_iface() -> String {
     let device = uci::load("network")
         .ok()
@@ -54,11 +48,8 @@ fn lan_iface() -> String {
     }
 }
 
-pub fn write_files(store: &DeviceStore, data_dir: &str) -> Result<()> {
-    let iface = lan_iface();
-    let macs = store.allowed_macs();
-
-    let mut table = String::from("set routerd_authorized {\n\ttype ether_addr\n");
+fn format_mac_set(name: &str, macs: &[String]) -> String {
+    let mut table = format!("set {name} {{\n\ttype ether_addr\n");
     if !macs.is_empty() {
         table.push_str("\telements = { ");
         for (i, mac) in macs.iter().enumerate() {
@@ -70,17 +61,54 @@ pub fn write_files(store: &DeviceStore, data_dir: &str) -> Result<()> {
         table.push_str(" }\n");
     }
     table.push_str("}\n");
+    table
+}
 
+pub(crate) fn render_auth_files(
+    store: &DeviceStore,
+    iface: &str,
+) -> Option<(String, String, String)> {
+    if store.enforcement {
+        let macs = store.allowed_macs();
+        let table = format_mac_set("routerd_authorized", &macs);
+        let fwd_rule = format!(
+            "iifname \"{iface}\" ether saddr != @routerd_authorized drop comment \"routerd: unauthorized forward\"\n"
+        );
+        // Block unauthorized LAN clients from probing SSH (22) or local router ports while permitting DHCP & DNS
+        let input_rule = format!(
+            "iifname \"{iface}\" ether saddr != @routerd_authorized udp dport {{ 53, 67 }} accept comment \"routerd: allow unauth dhcp/dns\"\n\
+             iifname \"{iface}\" ether saddr != @routerd_authorized tcp dport {{ 22, 53 }} reject comment \"routerd: block unauth ssh\"\n"
+        );
+        return Some((table, fwd_rule, input_rule));
+    }
+
+    let blocked = store.blocked_macs();
+    if blocked.is_empty() {
+        return None;
+    }
+    let table = format_mac_set("routerd_blocked", &blocked);
     let fwd_rule = format!(
-        "iifname \"{iface}\" ether saddr != @routerd_authorized drop comment \"routerd: unauthorized forward\"\n"
+        "iifname \"{iface}\" ether saddr @routerd_blocked drop comment \"routerd: blocked forward\"\n"
     );
-
-    // Block unauthorized LAN clients from probing SSH (22) or local router ports while permitting DHCP & DNS
     let input_rule = format!(
-        "iifname \"{iface}\" ether saddr != @routerd_authorized udp dport {{ 53, 67 }} accept comment \"routerd: allow unauth dhcp/dns\"\n\
-         iifname \"{iface}\" ether saddr != @routerd_authorized tcp dport {{ 22, 53 }} reject comment \"routerd: block unauth ssh\"\n"
+        "iifname \"{iface}\" ether saddr @routerd_blocked udp dport {{ 53, 67 }} accept comment \"routerd: allow blocked dhcp/dns\"\n\
+         iifname \"{iface}\" ether saddr @routerd_blocked tcp dport {{ 22, 53 }} reject comment \"routerd: block blocked ssh\"\n"
     );
+    Some((table, fwd_rule, input_rule))
+}
 
+fn remove_auth_files(data_dir: &str) {
+    for file in [TABLE_FILE, RULE_FILE, INPUT_FILE] {
+        let _ = std::fs::remove_file(format!("{data_dir}/{file}"));
+    }
+}
+
+pub fn write_files(store: &DeviceStore, data_dir: &str) -> Result<()> {
+    let iface = lan_iface();
+    let Some((table, fwd_rule, input_rule)) = render_auth_files(store, &iface) else {
+        remove_auth_files(data_dir);
+        return Ok(());
+    };
     util::write_atomic(&format!("{data_dir}/{TABLE_FILE}"), table.as_bytes(), 0o644)?;
     util::write_atomic(&format!("{data_dir}/{RULE_FILE}"), fwd_rule.as_bytes(), 0o644)?;
     util::write_atomic(&format!("{data_dir}/{INPUT_FILE}"), input_rule.as_bytes(), 0o644)?;
@@ -116,22 +144,23 @@ fn ensure_include(
     position: &str,
     chain: Option<&str>,
 ) -> Result<()> {
-    let bin = uci::bin();
     let cfg = uci::load("firewall").unwrap_or_default();
     if let Some(section) = cfg.section(sec) {
         if section.kind != "include" {
-            let _ = util::run_ok(bin, &["-q", "delete", &format!("firewall.{sec}")]);
+            let _ = uci::delete(&format!("firewall.{sec}"));
         }
     }
-    util::run(bin, &["set", &format!("firewall.{sec}=include")])?;
-    let base = format!("firewall.{sec}");
-    util::run(bin, &["set", &format!("{base}.type=nftables")])?;
-    util::run(bin, &["set", &format!("{base}.path={data_dir}/{file}")])?;
-    util::run(bin, &["set", &format!("{base}.position={position}")])?;
-    util::run(bin, &["set", &format!("{base}.enabled=1")])?;
+    uci::set(&format!("firewall.{sec}"), "include")?;
+    let mut ops = vec![
+        (sec.into(), "type".into(), Some("nftables".into())),
+        (sec.into(), "path".into(), Some(format!("{data_dir}/{file}"))),
+        (sec.into(), "position".into(), Some(position.into())),
+        (sec.into(), "enabled".into(), Some("1".into())),
+    ];
     if let Some(chain) = chain {
-        util::run(bin, &["set", &format!("{base}.chain={chain}")])?;
+        ops.push((sec.into(), "chain".into(), Some(chain.into())));
     }
+    uci::apply("firewall", &ops)?;
     Ok(())
 }
 
@@ -149,7 +178,6 @@ fn ensure_includes(data_dir: &str) -> Result<bool> {
     if !input_ok {
         ensure_include(INPUT_SEC, data_dir, INPUT_FILE, "chain-prepend", Some("input"))?;
     }
-    util::run(uci::bin(), &["commit", "firewall"])?;
     Ok(true)
 }
 
@@ -162,9 +190,8 @@ fn remove_includes() -> Result<bool> {
         return Ok(false);
     }
     for sec in [TABLE_SEC, RULE_SEC, INPUT_SEC] {
-        let _ = util::run_ok(uci::bin(), &["-q", "delete", &format!("firewall.{sec}")]);
+        let _ = uci::delete(&format!("firewall.{sec}"));
     }
-    util::run(uci::bin(), &["commit", "firewall"])?;
     Ok(true)
 }
 
@@ -174,48 +201,73 @@ fn reload_fw4() -> Result<()> {
 }
 
 fn flush_unauthorized_conntrack(store: &DeviceStore) {
-    let Some(ct) = conntrack_bin() else {
-        return;
+    let should_flush = |mac: &str, set: &HashSet<String>| -> bool {
+        if store.enforcement {
+            !set.contains(mac)
+        } else {
+            set.contains(mac)
+        }
     };
-    let allowed: HashSet<String> = store
-        .allowed_macs()
-        .into_iter()
-        .map(|m| m.to_ascii_lowercase())
-        .collect();
 
-    let mut target_ips: HashSet<String> = HashSet::new();
+    let mac_set: HashSet<String> = if store.enforcement {
+        store
+            .allowed_macs()
+            .into_iter()
+            .map(|m| m.to_ascii_lowercase())
+            .collect()
+    } else {
+        let blocked: HashSet<String> = store
+            .blocked_macs()
+            .into_iter()
+            .map(|m| m.to_ascii_lowercase())
+            .collect();
+        if blocked.is_empty() {
+            return;
+        }
+        blocked
+    };
+
+    let mut target_ips: HashSet<std::net::Ipv4Addr> = HashSet::new();
     for a in crate::openwrt::net::arp_table() {
         let mac = a["mac"].as_str().unwrap_or("").to_ascii_lowercase();
         let ip = a["ip"].as_str().unwrap_or("");
         let dev = a["device"].as_str().unwrap_or("");
         if !mac.is_empty()
-            && !ip.is_empty()
             && crate::openwrt::net::is_lan_arp_device(dev)
-            && !allowed.contains(&mac)
+            && should_flush(&mac, &mac_set)
         {
-            target_ips.insert(ip.to_string());
+            if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+                target_ips.insert(addr);
+            }
         }
     }
     for l in crate::openwrt::net::leases() {
         let mac = l["mac"].as_str().unwrap_or("").to_ascii_lowercase();
         let ip = l["ip"].as_str().unwrap_or("");
-        if !mac.is_empty() && !ip.is_empty() && !allowed.contains(&mac) {
-            target_ips.insert(ip.to_string());
+        if !mac.is_empty() && should_flush(&mac, &mac_set) {
+            if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+                target_ips.insert(addr);
+            }
         }
     }
 
-    for ip in target_ips {
-        let _ = util::run_ok(ct, &["-D", "-s", &ip]);
-        let _ = util::run_ok(ct, &["-D", "-d", &ip]);
+    if !target_ips.is_empty() {
+        if let Err(e) = crate::openwrt::conntrack::flush_ips(&target_ips) {
+            tracing::warn!("ctnetlink flush unauthorized failed: {e:#}");
+        }
     }
 }
 
 fn nft_sync(store: &DeviceStore) -> Result<()> {
     let bin = nft_bin().context("nft binary not found")?;
-    let macs = store.allowed_macs();
-    let mut script = String::from("flush set inet fw4 routerd_authorized\n");
+    let (set_name, macs) = if store.enforcement {
+        ("routerd_authorized", store.allowed_macs())
+    } else {
+        ("routerd_blocked", store.blocked_macs())
+    };
+    let mut script = format!("flush set inet fw4 {set_name}\n");
     if !macs.is_empty() {
-        script.push_str("add element inet fw4 routerd_authorized { ");
+        script.push_str(&format!("add element inet fw4 {set_name} {{ "));
         for (i, mac) in macs.iter().enumerate() {
             if i > 0 {
                 script.push_str(", ");
@@ -230,7 +282,14 @@ fn nft_sync(store: &DeviceStore) -> Result<()> {
 }
 
 fn sync_locked(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
-    if sim || !store.enforcement {
+    if sim {
+        return Ok(());
+    }
+    if !store.enforcement && store.blocked_macs().is_empty() {
+        remove_auth_files(data_dir);
+        if remove_includes()? {
+            reload_fw4()?;
+        }
         return Ok(());
     }
     write_files(store, data_dir)?;
@@ -254,26 +313,22 @@ pub fn sync(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     sync_locked(store, data_dir, sim)
 }
 
-pub fn enable(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
+pub fn reconfigure(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     if sim {
         return Ok(());
     }
     let _guard = lock().lock().unwrap();
+    if !store.enforcement && store.blocked_macs().is_empty() {
+        remove_auth_files(data_dir);
+        if remove_includes()? {
+            reload_fw4()?;
+        }
+        return Ok(());
+    }
     write_files(store, data_dir)?;
     ensure_includes(data_dir)?;
     reload_fw4()?;
     flush_unauthorized_conntrack(store);
-    Ok(())
-}
-
-pub fn disable(_data_dir: &str, sim: bool) -> Result<()> {
-    if sim {
-        return Ok(());
-    }
-    let _guard = lock().lock().unwrap();
-    if remove_includes()? {
-        reload_fw4()?;
-    }
     Ok(())
 }
 
@@ -282,7 +337,8 @@ pub fn bootstrap(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
         return Ok(());
     }
     let _guard = lock().lock().unwrap();
-    if !store.enforcement {
+    if !store.enforcement && store.blocked_macs().is_empty() {
+        remove_auth_files(data_dir);
         if remove_includes()? {
             reload_fw4()?;
         }
@@ -291,20 +347,7 @@ pub fn bootstrap(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     if nft_bin().is_none() {
         bail!("nft binary not found");
     }
-    write_files(store, data_dir)?;
-    let changed = ensure_includes(data_dir)?;
-    if changed {
-        reload_fw4()?;
-        flush_unauthorized_conntrack(store);
-        return Ok(());
-    }
-    match nft_sync(store) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            reload_fw4()?;
-            nft_sync(store)
-        }
-    }
+    sync_locked(store, data_dir, sim)
 }
 
 pub fn apply_qos(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
@@ -339,8 +382,7 @@ pub fn apply_qos(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
     if limits.is_empty() {
         let _ = std::fs::remove_file(&qos_path);
         if cfg.section(QOS_SEC).is_some() {
-            let _ = util::run_ok(uci::bin(), &["-q", "delete", &format!("firewall.{QOS_SEC}")]);
-            let _ = util::run(uci::bin(), &["commit", "firewall"]);
+            let _ = uci::delete(&format!("firewall.{QOS_SEC}"));
             reload_fw4()?;
         }
         return Ok(());
@@ -357,8 +399,56 @@ pub fn apply_qos(store: &DeviceStore, data_dir: &str, sim: bool) -> Result<()> {
         .unwrap_or(true);
     if needs_uci {
         ensure_include(QOS_SEC, data_dir, QOS_FILE, "chain-prepend", Some("forward"))?;
-        util::run(uci::bin(), &["commit", "firewall"])?;
     }
     reload_fw4()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::devices::Device;
+
+    #[test]
+    fn render_auth_files_covers_whitelist_blacklist_and_empty_free_mode() {
+        let mut store = DeviceStore::default();
+        store.devices.insert(
+            "AA:BB:CC:DD:EE:01".into(),
+            Device {
+                mac: "AA:BB:CC:DD:EE:01".into(),
+                authorized: true,
+                ..Device::default()
+            },
+        );
+        store.devices.insert(
+            "AA:BB:CC:DD:EE:02".into(),
+            Device {
+                mac: "AA:BB:CC:DD:EE:02".into(),
+                blocked: true,
+                ..Device::default()
+            },
+        );
+
+        // 1. Whitelist enforcement enabled
+        store.enforcement = true;
+        let (tbl, fwd, inp) = render_auth_files(&store, "br-lan").expect("whitelist rules");
+        assert!(tbl.contains("set routerd_authorized"));
+        assert!(tbl.contains("aa:bb:cc:dd:ee:01"));
+        assert!(!tbl.contains("aa:bb:cc:dd:ee:02"));
+        assert!(fwd.contains("ether saddr != @routerd_authorized drop"));
+        assert!(inp.contains("ether saddr != @routerd_authorized"));
+
+        // 2. Free mode with blocked MACs -> blacklist rules active
+        store.enforcement = false;
+        let (tbl, fwd, inp) = render_auth_files(&store, "br-lan").expect("blacklist rules");
+        assert!(tbl.contains("set routerd_blocked"));
+        assert!(tbl.contains("aa:bb:cc:dd:ee:02"));
+        assert!(!tbl.contains("aa:bb:cc:dd:ee:01"));
+        assert!(fwd.contains("ether saddr @routerd_blocked drop"));
+        assert!(inp.contains("ether saddr @routerd_blocked"));
+
+        // 3. Free mode with no blocked MACs -> None
+        store.unblock("AA:BB:CC:DD:EE:02");
+        assert!(render_auth_files(&store, "br-lan").is_none());
+    }
 }

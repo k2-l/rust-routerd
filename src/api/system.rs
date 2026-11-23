@@ -22,7 +22,57 @@ pub async fn info(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let info = tokio::task::spawn_blocking(move || sys::system_info(&static_info, cpu, rx, tx))
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(ok(serde_json::to_value(info).unwrap_or(Value::Null)))
+    let mut val = serde_json::to_value(info).unwrap_or(Value::Null);
+    if let Some(obj) = val.as_object_mut() {
+        let ntp_val = {
+            let guard = state.ntp.read().unwrap_or_else(|e| e.into_inner());
+            serde_json::to_value(&*guard).unwrap_or(Value::Null)
+        };
+        obj.insert("ntp".to_string(), ntp_val);
+    }
+    Ok(ok(val))
+}
+
+pub async fn processes() -> ApiResult<Json<Value>> {
+    let (memory, procs) = tokio::task::spawn_blocking(|| (sys::read_meminfo(), sys::top_processes(15)))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(ok(json!({ "memory": memory, "processes": procs })))
+}
+
+pub async fn ntp_sync(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let st = crate::openwrt::ntp::sync_now(&state.ntp, state.sim).await;
+    Ok(ok(json!({ "ntp": st })))
+}
+
+pub async fn get_tuning() -> ApiResult<Json<Value>> {
+    let cfg = tokio::task::spawn_blocking(sys::get_tuning)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(ok(serde_json::to_value(cfg).unwrap_or(Value::Null)))
+}
+
+#[derive(Deserialize, Default)]
+pub struct TuningBody {
+    wed_enabled: Option<bool>,
+    min_free_kbytes: Option<u64>,
+    dnsmasq_cachesize: Option<u64>,
+}
+
+pub async fn update_tuning(
+    State(state): State<AppState>,
+    Json(body): Json<TuningBody>,
+) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Err(ApiError::Forbidden("演示模式禁止修改系统调优参数".into()));
+    }
+    let updated = tokio::task::spawn_blocking(move || {
+        sys::set_tuning(body.wed_enabled, body.min_free_kbytes, body.dnsmasq_cachesize)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(ok(serde_json::to_value(updated).unwrap_or(Value::Null)))
 }
 
 pub async fn history(State(state): State<AppState>) -> Json<Value> {
@@ -30,9 +80,12 @@ pub async fn history(State(state): State<AppState>) -> Json<Value> {
     ok(snap)
 }
 
-pub async fn reboot() -> Json<Value> {
+pub async fn reboot(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Err(ApiError::Forbidden("演示模式禁止重启路由器".into()));
+    }
     let _ = sys::reboot();
-    ok(json!({"rebooting": true}))
+    Ok(ok(json!({"rebooting": true})))
 }
 
 pub async fn factory_reset(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -83,7 +136,7 @@ pub async fn restore(State(state): State<AppState>, mut multipart: Multipart) ->
     }
     let restore_path = "/tmp/routerd-restore.tar.gz";
     let mut size = 0u64;
-    let mut head = [0u8; 2];
+    let mut head: Vec<u8> = Vec::with_capacity(2);
     let mut found = false;
 
     while let Some(mut field) = multipart
@@ -105,8 +158,9 @@ pub async fn restore(State(state): State<AppState>, mut multipart: Multipart) ->
             .await
             .map_err(|e| ApiError::bad(format!("读取数据失败: {e}")))?
         {
-            if size == 0 && chunk.len() >= 2 {
-                head.copy_from_slice(&chunk[..2]);
+            if head.len() < 2 {
+                let take = (2 - head.len()).min(chunk.len());
+                head.extend_from_slice(&chunk[..take]);
             }
             size += chunk.len() as u64;
             if size > 4 * 1024 * 1024 {
@@ -127,7 +181,7 @@ pub async fn restore(State(state): State<AppState>, mut multipart: Multipart) ->
         return Err(ApiError::bad("缺少有效的备份文件"));
     }
     // Check GZIP magic bytes (0x1f 0x8b)
-    if head != [0x1f, 0x8b] {
+    if head.as_slice() != [0x1f, 0x8b] {
         let _ = tokio::fs::remove_file(restore_path).await;
         return Err(ApiError::bad("备份文件格式错误，仅支持 .tar.gz 格式"));
     }
@@ -150,8 +204,14 @@ pub struct HostnameRequest {
     hostname: String,
 }
 
-pub async fn set_hostname(Json(req): Json<HostnameRequest>) -> ApiResult<Json<Value>> {
-    let name = req.hostname.trim();
+pub async fn set_hostname(
+    State(state): State<AppState>,
+    Json(req): Json<HostnameRequest>,
+) -> ApiResult<Json<Value>> {
+    if state.sim {
+        return Err(ApiError::Forbidden("演示模式禁止修改主机名".into()));
+    }
+    let name = req.hostname.trim().to_string();
     if name.is_empty()
         || name.len() > 63
         || !name
@@ -161,9 +221,15 @@ pub async fn set_hostname(Json(req): Json<HostnameRequest>) -> ApiResult<Json<Va
     {
         return Err(ApiError::bad("主机名只能包含字母、数字、- 和 .，且不超过 63 位"));
     }
-    uci::set_opt("system", "@system[0]", "hostname", name)?;
-    uci::commit("system")?;
-    let _ = util::run("hostname", &[name]);
+    let name_owned = name.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        uci::set_opt("system", "@system[0]", "hostname", &name_owned)?;
+        uci::commit("system")?;
+        let _ = util::run("hostname", &[&name_owned]);
+        Ok(())
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(ok(json!({"hostname": name})))
 }
 
@@ -226,6 +292,8 @@ pub async fn events(
         let payload = json!({
             "cpu": sample.cpu,
             "mem": sample.mem,
+            "mem_used": sample.mem_used,
+            "mem_total": sample.mem_total,
             "rx_kbps": sample.rx,
             "tx_kbps": sample.tx,
             "uptime": uptime,

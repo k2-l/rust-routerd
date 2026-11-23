@@ -114,12 +114,24 @@ if [ "$SIZE" -gt "$LIMIT" ]; then
 	echo "ERROR: 固件体积 ${SIZE} 超过 25 MiB 限制" >&2
 	exit 2
 fi
-if grep -Eq "^(luci|uhttpd|rpcd-mod-luci|rpcd-mod-rrdns)" /root/cudy/work/firmware/*.manifest; then
-	echo "ERROR: 检测到残留 luci/uhttpd 软件包" >&2
+if grep -Eq "^(luci|uhttpd|rpcd|iwinfo |conntrack |ip-tiny |dnsmasq-full |wpad-openssl |autocore |kmod-nf-nathelper |bridger |libnettle8 |libgmp10 |libbpf1 |urngd )" /root/cudy/work/firmware/*.manifest; then
+	echo "ERROR: 检测到禁用或已替换的冗余软件包残留" >&2
 	exit 3
+fi
+if ! grep -q "^kmod-nf-conntrack-netlink " /root/cudy/work/firmware/*.manifest; then
+	echo "ERROR: 缺少 kmod-nf-conntrack-netlink" >&2
+	exit 4
 fi
 if ! grep -q "^kmod-nft-tproxy " /root/cudy/work/firmware/*.manifest; then
 	echo "ERROR: 缺少 kmod-nft-tproxy" >&2
+	exit 4
+fi
+if ! grep -q "^dnsmasq " /root/cudy/work/firmware/*.manifest; then
+	echo "ERROR: 缺少 dnsmasq" >&2
+	exit 4
+fi
+if ! grep -q "^wpad-basic-openssl " /root/cudy/work/firmware/*.manifest; then
+	echo "ERROR: 缺少 wpad-basic-openssl" >&2
 	exit 4
 fi
 cp "$IMG" /out/

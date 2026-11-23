@@ -141,7 +141,7 @@ pub fn add_redirect(payload: &Value) -> Result<String> {
 }
 
 pub fn update_redirect(section: &str, payload: &Value) -> Result<()> {
-    if !util::valid_name(section) {
+    if !util::valid_uci_section(section) {
         bail!("无效的规则 ID");
     }
     let cfg = uci::load("firewall")?;
@@ -166,7 +166,7 @@ fn field_or(payload: &Value, key: &str, default: &str) -> String {
 }
 
 pub fn delete_redirect(section: &str) -> Result<()> {
-    if !util::valid_name(section) {
+    if !util::valid_uci_section(section) {
         bail!("无效的规则 ID");
     }
     let cfg = uci::load("firewall")?;
@@ -180,7 +180,7 @@ pub fn delete_redirect(section: &str) -> Result<()> {
 }
 
 pub fn set_redirect_enabled(section: &str, enabled: bool) -> Result<()> {
-    if !util::valid_name(section) {
+    if !util::valid_uci_section(section) {
         bail!("无效的规则 ID");
     }
     uci::set_opt("firewall", section, "enabled", if enabled { "1" } else { "0" })?;
@@ -211,7 +211,9 @@ fn validate_rule(payload: &Value) -> Result<ValidatedRule> {
     if !["ACCEPT", "DROP", "REJECT"].contains(&target.as_str()) {
         bail!("动作必须是 ACCEPT / DROP / REJECT");
     }
-    if !["all", "tcp", "udp", "tcp udp", "icmp"].contains(&proto.as_str()) {
+    if !["all", "tcp", "udp", "tcp udp", "icmp", "igmp", "esp", "ah", "gre", "sctp"]
+        .contains(&proto.as_str())
+    {
         bail!("协议无效");
     }
     if !dest_port.is_empty() {
@@ -222,14 +224,22 @@ fn validate_rule(payload: &Value) -> Result<ValidatedRule> {
         }
     }
     if !src_ip.is_empty() {
-        let ip_part = src_ip.split('/').next().unwrap_or("");
+        let (ip_part, prefix_part) = match src_ip.split_once('/') {
+            Some((ip, p)) => (ip, Some(p)),
+            None => (src_ip.as_str(), None),
+        };
         if ip_part.parse::<std::net::Ipv4Addr>().is_err() {
             bail!("源 IP/CIDR 无效");
+        }
+        if let Some(p) = prefix_part {
+            if p.parse::<u8>().map(|n| n > 32).unwrap_or(true) {
+                bail!("源 CIDR 掩码长度必须在 0-32 之间");
+            }
         }
     }
     Ok(ValidatedRule {
         name,
-        src: field_or(payload, "src", "wan"),
+        src: field(payload, "src"),
         dest: field(payload, "dest"),
         proto,
         dest_port,
@@ -264,7 +274,7 @@ pub fn add_rule(payload: &Value) -> Result<String> {
 }
 
 pub fn update_rule(section: &str, payload: &Value) -> Result<()> {
-    if !util::valid_name(section) {
+    if !util::valid_uci_section(section) {
         bail!("无效的规则 ID");
     }
     let cfg = uci::load("firewall")?;

@@ -1,5 +1,11 @@
+pub mod conntrack;
+pub mod dhcp;
 pub mod firewall;
 pub mod net;
+pub mod netlink;
+pub mod nl80211;
+pub mod ntp;
+pub mod rtnetlink;
 pub mod sys;
 pub mod uci;
 pub mod ubus;

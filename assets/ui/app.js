@@ -393,6 +393,7 @@ async function renderOverview() {
         </div>
         <div class="kv mt-14">
           <div class="k">系统平均负载</div><div class="v mono">${(sys.load || []).map((x) => Number(x).toFixed(2)).join(' / ')}</div>
+          <div class="k">页缓存 / 驱动 DMA</div><div class="v mono">${fmtBytes((sys.memory.cached || 0) + (sys.memory.buffers || 0))} / ${fmtBytes(sys.memory.driver_dma || 0)}</div>
           <div class="k">固件存储空间</div><div class="v mono">${fmtBytes(sys.storage.used)} / ${fmtBytes(sys.storage.total)}</div>
         </div>
       </div>
@@ -414,9 +415,11 @@ async function renderOverview() {
         <div class="kv">
           <div class="k">本机 MAC</div><div class="v mono">${esc(sys.mac || '—')}</div>
           <div class="k">固件版本</div><div class="v mono">${esc(sys.firmware.version || '—')}</div>
+          <div class="k">NTP 时间同步</div><div class="v mono" id="ov-ntp-status">${esc(sys.ntp && sys.ntp.synced ? `已校时 (${sys.ntp.server})` : (sys.ntp && sys.ntp.enabled === false ? '已禁用' : '待同步'))}</div>
         </div>
         <div class="btn-row mt-20">
           <button class="btn" id="ov-redial">${icon('refresh')}重拨 WAN</button>
+          <button class="btn" id="ov-ntp-sync">${icon('refresh')}立即校时</button>
           <button class="btn btn-danger" id="ov-reboot">${icon('power')}重启路由</button>
         </div>
       </div>
@@ -428,6 +431,18 @@ async function renderOverview() {
   $('#ov-redial').onclick = async () => {
     try { await api('/api/network/wan/redial', { method: 'POST' }); toast('已下发 WAN 重拨指令'); }
     catch (e) { handleErr(e); }
+  };
+  $('#ov-ntp-sync').onclick = async () => {
+    try {
+      const res = await api('/api/system/ntp/sync', { method: 'POST' });
+      const n = res && res.ntp;
+      if (n && n.synced) {
+        $('#ov-ntp-status').textContent = `已校时 (${n.server})`;
+        toast(`时间已同步 (${n.server})`);
+      } else {
+        toast((n && n.last_error) || 'NTP 同步失败', 'bad');
+      }
+    } catch (e) { handleErr(e); }
   };
 
   if (window.EventSource) {
@@ -443,8 +458,9 @@ async function renderOverview() {
         hist.tx = [...(hist.tx || []).slice(-179), t.tx_kbps];
         drawTraffic($('#traffic-chart'), hist.rx, hist.tx);
         const g = $('#ov-gauges');
+        const memUsed = t.mem_used || sys.memory.used, memTotal = t.mem_total || sys.memory.total;
         if (g) g.innerHTML = ringGauge(t.cpu, '#22d3ee', 'CPU 负载', `${sys.cpu.cores} 核 · ${sys.temperature != null ? Math.round(sys.temperature) + '°C' : '正常'}`)
-          + ringGauge(t.mem, '#a78bfa', '内存占用', `${fmtBytes(sys.memory.used)} / ${fmtBytes(sys.memory.total)}`);
+          + ringGauge(t.mem, '#a78bfa', '内存占用', `${fmtBytes(memUsed)} / ${fmtBytes(memTotal)}`);
       } catch (_) {}
     });
   }
@@ -545,6 +561,27 @@ async function renderNetwork() {
 
     <div class="card mt-20">
       <div class="card-title"><h2>局域网 (LAN) 与 DHCP 服务</h2><span class="sub">${esc(d.lan.device)}</span></div>
+      ${(() => {
+        const eng = d.dhcp_engine || {};
+        const isRust = eng.active_engine === 'routerd';
+        const badge = eng.fallback_active
+          ? '<span class="badge warn">已自动降级至 dnsmasq 兜底</span>'
+          : isRust
+            ? '<span class="badge ok">Rust 内置 DHCP 运行中（dnsmasq 兜底待命）</span>'
+            : '<span class="badge">dnsmasq DHCP 运行中</span>';
+        return `<div class="row wrap gap-10" style="justify-content:space-between;align-items:center;padding:10px 12px;margin-bottom:14px;border-radius:10px;background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border,rgba(255,255,255,0.08))">
+          <div class="row wrap gap-10" style="align-items:center">
+            <span class="tiny muted">DHCP 引擎</span>
+            ${badge}
+            ${eng.last_error ? `<span class="tiny" style="color:var(--warn)">${esc(eng.last_error)}</span>` : ''}
+          </div>
+          <div class="row wrap gap-8" style="align-items:center">
+            ${isRust ? `<span class="tiny muted mono">池 ${esc(eng.pool_start)}-${esc(eng.pool_end)} · 租约 ${eng.active_leases || 0} · OFFER ${eng.offers_sent || 0} / ACK ${eng.acks_sent || 0} / NAK ${eng.naks_sent || 0}</span>` : ''}
+            <button type="button" class="btn btn-sm ${eng.configured_engine === 'dnsmasq' ? 'btn-primary' : ''}" id="dhcp-eng-dnsmasq">dnsmasq (兜底)</button>
+            <button type="button" class="btn btn-sm ${eng.configured_engine === 'routerd' ? 'btn-primary' : ''}" id="dhcp-eng-routerd">Rust 内置</button>
+          </div>
+        </div>`;
+      })()}
       <form id="lan-form">
         <div class="grid grid-2">
           <div>
@@ -689,6 +726,24 @@ async function renderNetwork() {
     } catch (ex) { handleErr(ex); }
   };
 
+  const switchDhcpEngine = async (engine) => {
+    const cur = (d.dhcp_engine && d.dhcp_engine.configured_engine) || 'dnsmasq';
+    if (engine === cur) return;
+    const msg = engine === 'routerd'
+      ? '将由 routerd 内置 Rust DHCP 接管 UDP :67，dnsmasq 仅保留 DNS 与自动兜底（共享 /tmp/dhcp.leases 零丢租约）。确定切换？'
+      : '将切回 dnsmasq DHCP 服务，routerd 释放 UDP :67 端口。确定切换？';
+    if (!await confirmDialog('切换 DHCP 引擎', msg, '确认切换')) return;
+    try {
+      await api('/api/network/dhcp/engine', { method: 'PUT', body: { engine } });
+      toast(engine === 'routerd' ? '已切换至 Rust 内置 DHCP（dnsmasq 兜底待命）' : '已切回 dnsmasq DHCP 服务');
+      go('network');
+    } catch (e) { handleErr(e); go('network'); }
+  };
+  const btnDnsmasq = $('#dhcp-eng-dnsmasq');
+  const btnRouterd = $('#dhcp-eng-routerd');
+  if (btnDnsmasq) btnDnsmasq.onclick = () => switchDhcpEngine('dnsmasq');
+  if (btnRouterd) btnRouterd.onclick = () => switchDhcpEngine('routerd');
+
   $('#lan-form').onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -771,8 +826,18 @@ async function renderNetwork() {
 }
 
 function encOptions(current) {
-  return [['none', '开放网络（无密码）'], ['psk2', 'WPA2-PSK 强加密'], ['sae', 'WPA3-SAE 新一代加密'], ['sae-mixed', 'WPA2 / WPA3 混合兼容']]
-    .map(([v, l]) => `<option value="${v}" ${current === v ? 'selected' : ''}>${l}</option>`).join('');
+  const opts = [
+    ['none', '开放网络（无密码）'],
+    ['psk2', 'WPA2-PSK 强加密'],
+    ['sae', 'WPA3-SAE 新一代加密'],
+    ['sae-mixed', 'WPA2 / WPA3 混合兼容'],
+    ['psk-mixed', 'WPA / WPA2 混合兼容'],
+    ['psk', 'WPA-PSK (旧版兼容)'],
+  ];
+  if (current && !opts.some(([v]) => v === current)) {
+    opts.push([current, current]);
+  }
+  return opts.map(([v, l]) => `<option value="${esc(v)}" ${current === v ? 'selected' : ''}>${esc(l)}</option>`).join('');
 }
 
 async function renderWireless() {
@@ -904,7 +969,7 @@ async function renderClients() {
 
   $$('[data-kick-mac]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm(`确定要将终端「${b.dataset.kickName || b.dataset.kickMac}」踢下线吗？`)) return;
+      if (!await confirmDialog('强制踢下线', `确定要将终端「${b.dataset.kickName || b.dataset.kickMac}」踢下线吗？`, '确认踢下线')) return;
       try {
         await api(`/api/access/devices/${encodeURIComponent(b.dataset.kickMac)}/kick`, { method: 'POST', body: { ban_secs: 10 } });
         toast('已强制踢下线');
@@ -915,7 +980,7 @@ async function renderClients() {
 
   $$('[data-block-mac]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm(`确定要拉黑终端「${b.dataset.blockName || b.dataset.blockMac}」并踢下线吗？`)) return;
+      if (!await confirmDialog('拉黑终端', `确定要拉黑终端「${b.dataset.blockName || b.dataset.blockMac}」并立即断开连接吗？`, '确认拉黑', true)) return;
       try {
         await api(`/api/access/devices/${encodeURIComponent(b.dataset.blockMac)}/block`, { method: 'POST', body: {} });
         await api(`/api/access/devices/${encodeURIComponent(b.dataset.blockMac)}/kick`, { method: 'POST', body: { ban_secs: 60 } }).catch(() => {});
@@ -964,6 +1029,7 @@ async function renderClients() {
 async function renderAccess() {
   const [d, a] = await Promise.all([api('/api/access'), api('/api/agents')]);
   const enabled = !!d.enforcement, sim = !!(state.meta && state.meta.sim);
+  const scopeBadges = (scopes) => (scopes || []).map((s) => `<span class="badge ${s === 'system:exec' ? 'bad' : 'muted'} mono">${esc(s)}</span>`).join('');
 
   const renderRows = (list, kind) => (list || []).map((dev) => {
     let btns = '';
@@ -989,6 +1055,11 @@ async function renderAccess() {
         </div>
       </div>
     </div>
+    <div class="card mt-20">
+      <div class="card-title"><h2>待放行设备 (Pending)</h2><span class="sub">${(d.pending || []).length} 台</span></div>
+      <div class="table-wrap"><table><thead><tr><th>设备</th><th>IP</th><th>状态</th><th class="right">操作</th></tr></thead>
+      <tbody>${renderRows(d.pending, 'pending') || '<tr><td colspan="4" class="empty">暂无待放行设备</td></tr>'}</tbody></table></div>
+    </div>
     <div class="grid grid-2 mt-20">
       <div class="card">
         <div class="card-title"><h2>已授权白名单</h2><span class="sub">${(d.authorized || []).length} 台</span></div>
@@ -1009,7 +1080,7 @@ async function renderAccess() {
       <div class="table-wrap mt-14"><table>
         <thead><tr><th>名称</th><th>ID</th><th>权限域</th><th class="right">操作</th></tr></thead>
         <tbody>${(a.tokens || []).map((t) => `<tr>
-          <td class="primary">${esc(t.name)}</td><td class="mono tiny">${esc(t.id)}</td><td class="tiny">${(t.scopes || []).map(esc).join(', ')}</td>
+          <td class="primary">${esc(t.name)}</td><td class="mono tiny">${esc(t.id)}</td><td class="tiny"><div style="display:flex;flex-wrap:wrap;gap:6px">${scopeBadges(t.scopes)}</div></td>
           <td class="right"><button class="btn btn-sm btn-danger" data-agent-del="${esc(t.id)}" ${sim ? 'disabled' : ''}>吊销</button></td>
         </tr>`).join('') || '<tr><td colspan="4" class="empty">暂无已签发的 Token</td></tr>'}</tbody>
       </table></div>
@@ -1027,16 +1098,34 @@ async function renderAccess() {
   $$('[data-agent-del]').forEach((b) => { b.onclick = async () => { try { await api(`/api/agents/${encodeURIComponent(b.dataset.agentDel)}`, { method: 'DELETE' }); toast('Token 已吊销'); go('access'); } catch (e) { handleErr(e); } }; });
   $('#agent-create').onclick = () => openModal(
     `<h3>签发 AI Agent Token</h3><p class="sub">密钥仅在创建时展示一次</p>
-     <form id="ag-f"><label class="field"><span>名称</span><input name="name" placeholder="例如：Home Assistant" required></label>
-     <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">创建</button></div></form>`,
+     <form id="ag-f">
+       <label class="field"><span>名称</span><input name="name" placeholder="例如：Home Assistant / 临时排障" required></label>
+       <div class="field">
+         <span>权限域</span>
+         <div style="display:flex;flex-direction:column;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:rgba(5,9,18,0.55)">
+           <label class="switch"><input type="checkbox" name="scope" value="devices:read" checked><span class="track"></span><span><span class="mono">devices:read</span> · 只读查询设备与系统状态</span></label>
+           <label class="switch"><input type="checkbox" name="scope" value="devices:write" checked><span class="track"></span><span><span class="mono">devices:write</span> · 管理准入、网络、无线、防火墙与代理配置</span></label>
+           <label class="switch"><input type="checkbox" name="scope" value="system:exec"><span class="track"></span><span><span class="mono" style="color:var(--bad)">system:exec</span> · 远程 Shell 系统调试（默认关闭）</span></label>
+           <div class="tiny" style="color:var(--bad)">高危：允许以 root 调用 <span class="mono">/api/agent/v1/system/exec</span> 执行系统命令，仅用于临时排障，用完请及时吊销</div>
+         </div>
+       </div>
+       <div class="btn-row"><button class="btn" type="button" data-cancel>取消</button><button class="btn btn-primary" type="submit">创建</button></div>
+     </form>`,
     {
       onMount(el, close) {
         el.querySelector('[data-cancel]').onclick = close;
         el.querySelector('#ag-f').onsubmit = async (e) => {
           e.preventDefault();
+          const form = e.target;
+          const scopes = $$('input[name="scope"]:checked', form).map((cb) => cb.value);
+          if (!scopes.length) { toast('请至少选择一个权限域', 'bad'); return; }
           try {
-            const res = await api('/api/agents', { method: 'POST', body: { name: new FormData(e.target).get('name'), scopes: ['devices:read', 'devices:write'] } });
-            el.querySelector('.modal').innerHTML = `<h3>Token 创建成功</h3><pre class="log">${esc(res.token)}</pre><div class="btn-row"><button class="btn btn-primary" data-ok>完成</button></div>`;
+            const res = await api('/api/agents', { method: 'POST', body: { name: new FormData(form).get('name'), scopes } });
+            const granted = (res.agent && res.agent.scopes) || scopes;
+            const execHint = granted.includes('system:exec')
+              ? '<p class="tiny muted mt-14">调试执行入口：<span class="mono">POST /api/agent/v1/system/exec</span></p>'
+              : '';
+            el.querySelector('.modal').innerHTML = `<h3>Token 创建成功</h3><div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 12px">${scopeBadges(granted)}</div><pre class="log">${esc(res.token)}</pre>${execHint}<div class="btn-row"><button class="btn btn-primary" data-ok>完成</button></div>`;
             el.querySelector('[data-ok]').onclick = () => { close(); go('access'); };
           } catch (ex) { handleErr(ex); }
         };
@@ -1178,7 +1267,7 @@ async function renderFirewall() {
        </div>
        <div class="field-row">
          <label class="field"><span>协议</span><select name="proto">
-           ${['tcp', 'udp', 'tcp udp', 'icmp', 'all'].map((p) => `<option value="${p}" ${existing && existing.proto === p ? 'selected' : ''}>${p.toUpperCase()}</option>`).join('')}
+           ${['tcp', 'udp', 'tcp udp', 'icmp', 'igmp', 'esp', 'all'].map((p) => `<option value="${p}" ${existing && existing.proto === p ? 'selected' : ''}>${p.toUpperCase()}</option>`).join('')}
          </select></label>
          <label class="field"><span>目标端口 (可选)</span><input name="dest_port" value="${esc(existing ? existing.dest_port : '')}" placeholder="如 22 或 80 443"></label>
        </div>
@@ -1316,6 +1405,12 @@ async function renderSingbox() {
   </tr>`).join('');
 
   const obOptions = outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${ob.tag === finalOb ? 'selected' : ''}>${esc(ob.tag)} (${esc(ob.type)})</option>`).join('');
+  const dnsProxyOb = (cfg.dns && cfg.dns.proxy_outbound) || '';
+  const hasDnsOb = outbounds.some((ob) => ob.tag === dnsProxyOb);
+  const dnsObOptions = [`<option value="" ${!dnsProxyOb ? 'selected' : ''}>自动选择 (跟随路由/全局)</option>`]
+    .concat(dnsProxyOb && !hasDnsOb ? [`<option value="${esc(dnsProxyOb)}" selected>${esc(dnsProxyOb)} (未定义)</option>`] : [])
+    .concat(outbounds.map((ob) => `<option value="${esc(ob.tag)}" ${ob.tag === dnsProxyOb ? 'selected' : ''}>${esc(ob.tag)} (${esc(ob.type)})</option>`))
+    .join('');
 
   const devRows = (data.devices || []).map((d) => {
     const opts = [`<option value="default" ${!d.policy ? 'selected' : ''}>默认 (跟随全局)</option>`]
@@ -1411,12 +1506,13 @@ async function renderSingbox() {
             <label class="field"><span>直连 DNS 上游</span><input name="direct_upstream" value="${esc((cfg.dns && cfg.dns.direct_upstream) || '223.5.5.5:53')}" required></label>
             <label class="field"><span>代理 DNS 上游</span><input name="proxy_upstream" value="${esc((cfg.dns && cfg.dns.proxy_upstream) || '8.8.8.8:53')}" required></label>
           </div>
+          <label class="field"><span>代理 DNS 出口节点 (proxy_outbound)</span><select name="proxy_outbound">${dnsObOptions}</select></label>
           <div class="field-row">
             <label class="field"><span>FakeIP 模式</span><select name="fakeip_enabled">
               <option value="0" ${!(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>关闭 (代理隧道解析)</option>
               <option value="1" ${(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>开启 (198.18.0.0/15)</option>
             </select></label>
-            <label class="field"><span>联动 dnsmasq-full</span><select name="link_dnsmasq">
+            <label class="field"><span>联动 dnsmasq</span><select name="link_dnsmasq">
               <option value="0" ${!(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>否</option>
               <option value="1" ${(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>是 (自动接管上游)</option>
             </select></label>
@@ -1510,6 +1606,22 @@ async function renderSingbox() {
   $$('[data-sb-del-ob]').forEach((b) => {
     b.onclick = async () => {
       const idx = Number(b.dataset.sbDelOb);
+      const tag = outbounds[idx] && outbounds[idx].tag;
+      if (tag) {
+        if (cfg.route && cfg.route.final === tag) {
+          toast(`节点「${tag}」正被全局兜底出站 (final) 引用，请先更换后再删除`, 'bad');
+          return;
+        }
+        const refRule = ((cfg.route && cfg.route.rules) || []).find((r) => r.outbound === tag);
+        if (refRule) {
+          toast(`节点「${tag}」正被分流规则「${refRule.name || '未命名'}」引用，请先调整后再删除`, 'bad');
+          return;
+        }
+        if (cfg.dns && cfg.dns.proxy_outbound === tag) {
+          toast(`节点「${tag}」正被 DNS 代理出口引用，请先更换后再删除`, 'bad');
+          return;
+        }
+      }
       const next = structuredClone(cfg);
       next.outbounds.splice(idx, 1);
       try { await saveConfig(next, '节点已删除'); } catch (e) { handleErr(e); }
@@ -1570,6 +1682,7 @@ async function renderSingbox() {
     next.dns.listen = f.get('dns_listen').trim();
     next.dns.direct_upstream = f.get('direct_upstream').trim();
     next.dns.proxy_upstream = f.get('proxy_upstream').trim();
+    next.dns.proxy_outbound = f.get('proxy_outbound') || '';
     next.dns.link_dnsmasq = f.get('link_dnsmasq') === '1';
     next.dns.fakeip = next.dns.fakeip || { inet4_range: '198.18.0.0/15', ttl: 60 };
     next.dns.fakeip.enabled = f.get('fakeip_enabled') === '1';
@@ -1764,6 +1877,7 @@ async function renderSingbox() {
               if (oldTag && oldTag !== ob.tag) {
                 (next.route.rules || []).forEach((r) => { if (r.outbound === oldTag) r.outbound = ob.tag; });
                 if (next.route.final === oldTag) next.route.final = ob.tag;
+                if (next.dns && next.dns.proxy_outbound === oldTag) next.dns.proxy_outbound = ob.tag;
               }
             } else {
               next.outbounds.push(ob);
@@ -1837,7 +1951,20 @@ async function renderSingbox() {
 }
 
 async function renderSystem() {
-  const sys = await api('/api/system');
+  const [sys, procData, tuning] = await Promise.all([
+    api('/api/system'),
+    api('/api/system/processes').catch(() => null),
+    api('/api/system/tuning').catch(() => null),
+  ]);
+  const mem = (procData && procData.memory) || sys.memory || {};
+  const procs = (procData && procData.processes) || [];
+  const t = tuning || { wed_enabled: true, wed_active: true, wed_reboot_required: false, min_free_kbytes: 16384, dnsmasq_cachesize: 8000 };
+  const procRows = procs.slice(0, 10).map((p) => `<tr>
+    <td class="mono muted">${p.pid}</td>
+    <td class="primary mono">${esc(p.name)}</td>
+    <td class="right mono">${fmtBytes(p.anon_bytes)}</td>
+    <td class="right mono">${fmtBytes(p.rss_bytes)}</td>
+  </tr>`).join('');
   $('#view').innerHTML = `
     <div class="grid grid-2">
       <div class="card">
@@ -1862,7 +1989,7 @@ async function renderSystem() {
         <div class="file-drop" id="fw-drop">
           ${icon('upload')}
           <div>点击选择或拖入 sysupgrade 固件包 (.bin)</div>
-          <div class="tiny muted">自动校验元数据与 SHA256 · 最大 64MB</div>
+          <div class="tiny muted">自动校验元数据与 SHA256 · 最大 32MB</div>
           <div class="file-name hidden" id="fw-name"></div>
         </div>
         <div class="progress hidden mt-14" id="fw-progress"><i></i></div>
@@ -1885,7 +2012,59 @@ async function renderSystem() {
           <button class="btn btn-danger" id="sys-factory-reset">${icon('power')}恢复出厂设置</button>
         </div>
       </div>
+    </div>
+
+    <div class="grid grid-2 mt-20">
+      <div class="card">
+        <div class="card-title"><h2>内存与性能调优</h2><span class="badge ${t.wed_active ? 'good' : 'muted'}">WED ${t.wed_active ? '运行中' : '已关闭'}</span></div>
+        <form id="tuning-form">
+          <label class="field"><span>无线 WED 硬件加速 (mt7915e)</span><select name="wed_enabled">
+            <option value="1" ${t.wed_enabled ? 'selected' : ''}>开启 (极限 Wi-Fi 吞吐，占 ~40–55 MB DMA)</option>
+            <option value="0" ${!t.wed_enabled ? 'selected' : ''}>关闭 (省内存，开启 TProxy 时推荐)</option>
+          </select></label>
+          <div class="field-row">
+            <label class="field"><span>内核保留水位 (min_free_kbytes)</span><select name="min_free_kbytes">
+              ${[4096, 8192, 16384, 32768].map((v) => `<option value="${v}" ${Number(t.min_free_kbytes) === v ? 'selected' : ''}>${v} KB (${Math.round(v / 1024)} MB)</option>`).join('')}
+            </select></label>
+            <label class="field"><span>dnsmasq 缓存条数</span><select name="dnsmasq_cachesize">
+              ${[500, 1500, 4000, 8000].map((v) => `<option value="${v}" ${Number(t.dnsmasq_cachesize) === v ? 'selected' : ''}>${v} 条</option>`).join('')}
+            </select></label>
+          </div>
+          ${t.wed_reboot_required ? '<div class="tiny" style="color:var(--warn);margin-bottom:10px">提示：WED 开关配置已修改，重启路由器后生效。</div>' : ''}
+          <div class="btn-row"><button class="btn btn-primary" type="submit">${icon('save')}应用调优参数</button></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><h2>内存透视与进程排行</h2><span class="sub">实际占用 ${fmtBytes(mem.used)} / ${fmtBytes(mem.total)}</span></div>
+        <div class="kv" style="margin-bottom:12px">
+          <div class="k">驱动 DMA 池 (WED/网卡)</div><div class="v mono">${fmtBytes(mem.driver_dma)}</div>
+          <div class="k">内核 Slab / 页缓存</div><div class="v mono">${fmtBytes(mem.slab)} / ${fmtBytes((mem.cached || 0) + (mem.buffers || 0))}</div>
+          <div class="k">用户态私有 / 完全空闲</div><div class="v mono">${fmtBytes(mem.anon_pages)} / ${fmtBytes(mem.free)}</div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>PID</th><th>进程</th><th class="right">私有 (Anon)</th><th class="right">常驻 (RSS)</th></tr></thead>
+          <tbody>${procRows || '<tr><td colspan="4" class="empty">暂无进程数据</td></tr>'}</tbody>
+        </table></div>
+      </div>
     </div>`;
+
+  $('#tuning-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      const res = await api('/api/system/tuning', {
+        method: 'PUT',
+        body: {
+          wed_enabled: f.get('wed_enabled') === '1',
+          min_free_kbytes: Number(f.get('min_free_kbytes')),
+          dnsmasq_cachesize: Number(f.get('dnsmasq_cachesize')),
+        },
+      });
+      toast(res && res.wed_reboot_required ? '调优参数已保存，WED 变更将在重启后生效' : '调优参数已应用');
+      go('system');
+    } catch (ex) { handleErr(ex); }
+  };
 
   $('#host-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -1902,13 +2081,13 @@ async function renderSystem() {
   };
 
   const input = $('#fw-file'), drop = $('#fw-drop');
-  drop.onclick = () => input.click();
-  input.onchange = async () => {
-    const file = input.files && input.files[0];
+  const uploadFirmwareFile = (file) => {
     if (!file) return;
     $('#fw-name').textContent = `${file.name} (${fmtBytes(file.size)})`;
     $('#fw-name').classList.remove('hidden');
     $('#fw-progress').classList.remove('hidden');
+    $('#fw-progress > i').style.width = '0%';
+    $('#fw-apply').disabled = true;
     const fd = new FormData(); fd.append('firmware', file, file.name);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/firmware/upload');
@@ -1922,8 +2101,19 @@ async function renderSystem() {
         toast('固件上传完成');
       } else toast(j.error || '上传失败', 'bad');
     };
+    xhr.onerror = () => toast('固件上传网络错误', 'bad');
     xhr.send(fd);
   };
+  drop.onclick = () => input.click();
+  drop.ondragover = (ev) => { ev.preventDefault(); drop.classList.add('dragover'); };
+  drop.ondragleave = () => drop.classList.remove('dragover');
+  drop.ondrop = (ev) => {
+    ev.preventDefault();
+    drop.classList.remove('dragover');
+    const file = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+    uploadFirmwareFile(file);
+  };
+  input.onchange = () => uploadFirmwareFile(input.files && input.files[0]);
   $('#fw-apply').onclick = async () => {
     if (!await confirmDialog('确认刷写固件', '设备将写入新固件并自动重启，确定继续？', '立即刷写', true)) return;
     try { await api('/api/firmware/apply', { method: 'POST', body: { keep_config: $('#fw-keep').checked } }); toast('正在刷写固件…'); }
@@ -1973,8 +2163,9 @@ async function renderLogs() {
       if (box) { box.textContent = d.log || '(暂无日志)'; box.scrollTop = box.scrollHeight; }
     } catch (e) {}
   };
+  let filterTimer = null;
   $('#log-refresh').onclick = load;
-  $('#log-filter').oninput = load;
+  $('#log-filter').oninput = () => { clearTimeout(filterTimer); filterTimer = setTimeout(load, 300); };
   $('#log-lines').onchange = load;
   await load();
   setTimer(load, 5000);

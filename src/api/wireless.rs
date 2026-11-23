@@ -56,7 +56,10 @@ pub async fn clients(
     let data = tokio::task::spawn_blocking(move || {
         let mut clients = wireless::clients();
         let leases = net::leases();
-        let arp = net::arp_table();
+        let arp: Vec<Value> = net::arp_table()
+            .into_iter()
+            .filter(|a| net::is_lan_arp_device(a["device"].as_str().unwrap_or("")))
+            .collect();
         let store = state.access.read().unwrap_or_else(|e| e.into_inner());
         for c in &mut clients {
             if let Some(mac) = c["mac"].as_str() {

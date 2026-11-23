@@ -205,7 +205,14 @@ async fn main() {
             sb.bootstrap().await;
         });
     }
+    {
+        let dhcp = state.dhcp.clone();
+        tokio::spawn(async move {
+            dhcp.bootstrap().await;
+        });
+    }
     openwrt::sys::spawn_sampler(state.history.clone());
+    openwrt::ntp::spawn_ntp(state.ntp.clone(), state.sim);
     {
         let sessions = state.sessions.clone();
         let attempts = state.attempts.clone();
@@ -231,14 +238,23 @@ async fn main() {
                 let access = access.clone();
                 let data_dir = data_dir.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    let mut store = access.write().unwrap_or_else(|e| e.into_inner());
-                    let changed = store.scan();
-                    if changed {
-                        let _ = store.save(&format!("{data_dir}/access.json"));
-                        if store.enforcement && !sim {
-                            if let Err(e) = access::nft::sync(&store, &data_dir, sim) {
-                                tracing::warn!("access enforcement sync failed: {e:#}");
+                    let sync_snap = {
+                        let mut store = access.write().unwrap_or_else(|e| e.into_inner());
+                        let changed = store.scan();
+                        if changed {
+                            let _ = store.save(&format!("{data_dir}/access.json"));
+                            if !sim && (store.enforcement || !store.blocked_macs().is_empty()) {
+                                Some(store.clone())
+                            } else {
+                                None
                             }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(snap) = sync_snap {
+                        if let Err(e) = access::nft::sync(&snap, &data_dir, sim) {
+                            tracing::warn!("access enforcement sync failed: {e:#}");
                         }
                     }
                 })
@@ -319,6 +335,7 @@ async fn main() {
     }
 
     tracing::info!("shutting down");
+    state.dhcp.shutdown().await;
     state.singbox.stop().await;
     let _ = tx.send(true);
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;

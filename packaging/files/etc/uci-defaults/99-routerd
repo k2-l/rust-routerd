@@ -22,13 +22,31 @@ uci -q delete network.wan6
 uci -q delete dhcp.lan.dhcpv6
 uci -q delete dhcp.lan.ra
 uci -q set network.globals.ula_prefix=''
+uci -q del_list firewall.@zone[1].network='wan6'
 uci commit network
 uci commit dhcp
+uci commit firewall
 
-# Stock web stack is not part of this image, but handle preserved configs.
+# Stock web/rpcd stacks are not part of this image, but handle preserved configs.
 if [ -x /etc/init.d/uhttpd ]; then
 	/etc/init.d/uhttpd stop 2>/dev/null
 	/etc/init.d/uhttpd disable 2>/dev/null
+fi
+if [ -x /etc/init.d/rpcd ]; then
+	/etc/init.d/rpcd stop 2>/dev/null
+	/etc/init.d/rpcd disable 2>/dev/null
+fi
+if [ -x /etc/init.d/bridger ]; then
+	/etc/init.d/bridger stop 2>/dev/null
+	/etc/init.d/bridger disable 2>/dev/null
+fi
+if [ -x /etc/init.d/sysntpd ]; then
+	/etc/init.d/sysntpd stop 2>/dev/null
+	/etc/init.d/sysntpd disable 2>/dev/null
+fi
+if [ -x /etc/init.d/urngd ]; then
+	/etc/init.d/urngd stop 2>/dev/null
+	/etc/init.d/urngd disable 2>/dev/null
 fi
 
 # Make sure routerd is enabled for this boot and future boots.

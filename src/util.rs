@@ -88,6 +88,26 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
+/// Validate a UCI section identifier, allowing both named sections and anonymous `@type[index]` selectors.
+pub fn valid_uci_section(name: &str) -> bool {
+    if valid_name(name) {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix('@') else {
+        return false;
+    };
+    let Some((kind, idx_part)) = rest.split_once('[') else {
+        return false;
+    };
+    let Some(idx) = idx_part.strip_suffix(']') else {
+        return false;
+    };
+    !kind.is_empty()
+        && kind.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !idx.is_empty()
+        && idx.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Quote a value for `uci set` argv: we never use a shell, so no escaping is
 /// required beyond rejecting NUL bytes (which cannot appear in a Command arg).
 pub fn clean_value(value: &str) -> Result<&str> {

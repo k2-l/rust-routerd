@@ -1,8 +1,241 @@
 use std::collections::BTreeMap;
+use std::os::unix::io::RawFd;
+use std::sync::Mutex;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::util;
+
+static UCI_LOCK: Mutex<()> = Mutex::new(());
+
+struct FlockGuard {
+    fd: RawFd,
+}
+
+impl Drop for FlockGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.fd, libc::LOCK_UN);
+            libc::close(self.fd);
+        }
+    }
+}
+
+fn uci_dir() -> String {
+    std::env::var("ROUTERD_UCI_DIR").unwrap_or_else(|_| "/etc/config".to_string())
+}
+
+fn lock_config(config: &str, dir: &str) -> Option<FlockGuard> {
+    let try_open = |path: &str| -> Option<RawFd> {
+        let cpath = std::ffi::CString::new(path).ok()?;
+        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600) };
+        if fd >= 0 {
+            Some(fd)
+        } else {
+            None
+        }
+    };
+    let fd = try_open(&format!("/tmp/.routerd-uci-{config}.lock"))
+        .or_else(|| try_open(&format!("{dir}/.routerd-uci-{config}.lock")))?;
+    unsafe {
+        libc::flock(fd, libc::LOCK_EX);
+    }
+    Some(FlockGuard { fd })
+}
+
+#[derive(Debug, Clone)]
+enum RawItem {
+    Option(String, String),
+    List(String, Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+struct RawSection {
+    kind: String,
+    name: Option<String>,
+    items: Vec<RawItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FileDoc {
+    sections: Vec<RawSection>,
+}
+
+impl FileDoc {
+    fn parse(text: &str) -> Self {
+        let mut doc = Self::default();
+        let mut cur: Option<usize> = None;
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let tokens = tokenize(line);
+            if tokens.is_empty() {
+                continue;
+            }
+            match tokens[0].as_str() {
+                "config" if tokens.len() >= 2 => {
+                    let kind = tokens[1].clone();
+                    let name = tokens.get(2).filter(|s| !s.is_empty()).cloned();
+                    if let Some(ref n) = name {
+                        if let Some(pos) = doc
+                            .sections
+                            .iter()
+                            .position(|s| s.name.as_deref() == Some(n.as_str()))
+                        {
+                            doc.sections[pos].kind = kind;
+                            cur = Some(pos);
+                            continue;
+                        }
+                    }
+                    doc.sections.push(RawSection {
+                        kind,
+                        name,
+                        items: Vec::new(),
+                    });
+                    cur = Some(doc.sections.len() - 1);
+                }
+                "option" if tokens.len() >= 3 => {
+                    if let Some(idx) = cur {
+                        let key = tokens[1].clone();
+                        let val = tokens[2..].join(" ");
+                        set_section_option(&mut doc.sections[idx], &key, val);
+                    }
+                }
+                "list" if tokens.len() >= 3 => {
+                    if let Some(idx) = cur {
+                        let key = tokens[1].clone();
+                        let vals: Vec<String> = tokens[2..].to_vec();
+                        append_section_list(&mut doc.sections[idx], &key, &vals);
+                    }
+                }
+                _ => {}
+            }
+        }
+        doc
+    }
+
+    fn resolve(&self, selector: &str) -> Option<usize> {
+        if let Some(rest) = selector.strip_prefix('@') {
+            let (kind, idx_part) = rest.split_once('[')?;
+            let idx_str = idx_part.strip_suffix(']')?;
+            let target: usize = idx_str.parse().ok()?;
+            let mut count = 0usize;
+            for (i, sec) in self.sections.iter().enumerate() {
+                if sec.kind == kind {
+                    if count == target {
+                        return Some(i);
+                    }
+                    count += 1;
+                }
+            }
+            None
+        } else {
+            self.sections
+                .iter()
+                .position(|s| s.name.as_deref() == Some(selector))
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        for (i, sec) in self.sections.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            match &sec.name {
+                Some(name) => {
+                    out.push_str(&format!("config {} '{}'\n", sec.kind, escape_uci(name)));
+                }
+                None => {
+                    out.push_str(&format!("config {}\n", sec.kind));
+                }
+            }
+            for item in &sec.items {
+                match item {
+                    RawItem::Option(k, v) => {
+                        out.push_str(&format!("\toption {} '{}'\n", k, escape_uci(v)));
+                    }
+                    RawItem::List(k, vals) => {
+                        for v in vals {
+                            out.push_str(&format!("\tlist {} '{}'\n", k, escape_uci(v)));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+fn escape_uci(v: &str) -> String {
+    v.replace('\'', "'\\''")
+}
+
+fn set_section_option(sec: &mut RawSection, key: &str, val: String) {
+    for item in &mut sec.items {
+        match item {
+            RawItem::Option(k, existing) if k == key => {
+                *existing = val;
+                return;
+            }
+            RawItem::List(k, _) if k == key => {
+                *item = RawItem::Option(key.to_string(), val);
+                return;
+            }
+            _ => {}
+        }
+    }
+    sec.items.push(RawItem::Option(key.to_string(), val));
+}
+
+fn set_section_list(sec: &mut RawSection, key: &str, vals: Vec<String>) {
+    sec.items.retain(|item| match item {
+        RawItem::Option(k, _) | RawItem::List(k, _) => k != key,
+    });
+    if !vals.is_empty() {
+        sec.items.push(RawItem::List(key.to_string(), vals));
+    }
+}
+
+fn append_section_list(sec: &mut RawSection, key: &str, vals: &[String]) {
+    for item in &mut sec.items {
+        if let RawItem::List(k, existing) = item {
+            if k == key {
+                existing.extend(vals.iter().cloned());
+                return;
+            }
+        }
+    }
+    sec.items.push(RawItem::List(key.to_string(), vals.to_vec()));
+}
+
+fn delete_section_item(sec: &mut RawSection, key: &str) {
+    sec.items.retain(|item| match item {
+        RawItem::Option(k, _) | RawItem::List(k, _) => k != key,
+    });
+}
+
+fn with_doc<T>(config: &str, write: bool, f: impl FnOnce(&mut FileDoc) -> Result<T>) -> Result<T> {
+    if !util::valid_name(config) {
+        bail!("invalid uci config: {config}");
+    }
+    let dir = uci_dir();
+    let _mem_guard = UCI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _flock_guard = lock_config(config, &dir);
+    let path = format!("{dir}/{config}");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc = FileDoc::parse(&text);
+    let res = f(&mut doc)?;
+    if write {
+        std::fs::create_dir_all(&dir).ok();
+        let rendered = doc.render();
+        util::write_atomic(&path, rendered.as_bytes(), 0o644)
+            .with_context(|| format!("write uci config {path}"))?;
+    }
+    Ok(res)
+}
 
 /// One UCI section, addressable by its (possibly anonymous) name.
 #[derive(Debug, Clone, Default)]
@@ -48,6 +281,7 @@ impl Config {
     }
 }
 
+#[allow(dead_code)]
 pub fn bin() -> &'static str {
     uci_bin()
 }
@@ -214,52 +448,142 @@ fn parse_show(config: &str, text: &str) -> Config {
 }
 
 pub fn set(path: &str, value: &str) -> Result<()> {
-    let value = util::clean_value(value)?;
-    util::run(uci_bin(), &["set", &format!("{path}={value}")])?;
-    Ok(())
+    let value = util::clean_value(value)?.to_string();
+    let parts: Vec<&str> = path.splitn(3, '.').collect();
+    match parts.as_slice() {
+        [config, section] => {
+            if !util::valid_name(section) || !util::valid_name(&value) {
+                bail!("invalid uci section/kind: {path}={value}");
+            }
+            with_doc(config, true, |doc| {
+                if let Some(idx) = doc.resolve(section) {
+                    doc.sections[idx].kind = value;
+                } else {
+                    doc.sections.push(RawSection {
+                        kind: value,
+                        name: Some((*section).to_string()),
+                        items: Vec::new(),
+                    });
+                }
+                Ok(())
+            })
+        }
+        [config, section, option] => {
+            if !util::valid_uci_section(section) || !util::valid_name(option) {
+                bail!("invalid uci path: {path}");
+            }
+            with_doc(config, true, |doc| {
+                let Some(idx) = doc.resolve(section) else {
+                    bail!("uci section not found: {config}.{section}");
+                };
+                set_section_option(&mut doc.sections[idx], option, value);
+                Ok(())
+            })
+        }
+        _ => bail!("invalid uci set path: {path}"),
+    }
 }
 
 pub fn set_opt(config: &str, section: &str, option: &str, value: &str) -> Result<()> {
     set(&format!("{config}.{section}.{option}"), value)
 }
 
+pub fn set_list(config: &str, section: &str, option: &str, values: &[&str]) -> Result<()> {
+    if !util::valid_uci_section(section) || !util::valid_name(option) {
+        bail!("invalid uci list path: {config}.{section}.{option}");
+    }
+    let mut cleaned = Vec::with_capacity(values.len());
+    for v in values {
+        cleaned.push(util::clean_value(v)?.to_string());
+    }
+    with_doc(config, true, |doc| {
+        let Some(idx) = doc.resolve(section) else {
+            bail!("uci section not found: {config}.{section}");
+        };
+        set_section_list(&mut doc.sections[idx], option, cleaned);
+        Ok(())
+    })
+}
+
 pub fn delete(path: &str) -> Result<()> {
-    util::run(uci_bin(), &["-q", "delete", path])?;
-    Ok(())
+    let parts: Vec<&str> = path.splitn(3, '.').collect();
+    match parts.as_slice() {
+        [config, section] => {
+            if !util::valid_uci_section(section) {
+                bail!("invalid uci section: {path}");
+            }
+            with_doc(config, true, |doc| {
+                if let Some(idx) = doc.resolve(section) {
+                    doc.sections.remove(idx);
+                }
+                Ok(())
+            })
+        }
+        [config, section, option] => {
+            if !util::valid_uci_section(section) || !util::valid_name(option) {
+                bail!("invalid uci option: {path}");
+            }
+            with_doc(config, true, |doc| {
+                if let Some(idx) = doc.resolve(section) {
+                    delete_section_item(&mut doc.sections[idx], option);
+                }
+                Ok(())
+            })
+        }
+        _ => bail!("invalid uci delete path: {path}"),
+    }
 }
 
 pub fn add(config: &str, kind: &str) -> Result<String> {
     if !util::valid_name(config) || !util::valid_name(kind) {
         bail!("invalid uci config/type");
     }
-    let name = util::run(uci_bin(), &["add", config, kind])?;
-    Ok(name.trim().to_string())
+    with_doc(config, true, |doc| {
+        let idx = doc.sections.iter().filter(|s| s.kind == kind).count();
+        doc.sections.push(RawSection {
+            kind: kind.to_string(),
+            name: None,
+            items: Vec::new(),
+        });
+        Ok(format!("@{kind}[{idx}]"))
+    })
 }
 
 pub fn commit(config: &str) -> Result<()> {
     if !util::valid_name(config) {
         bail!("invalid uci config");
     }
-    util::run(uci_bin(), &["commit", config])?;
     Ok(())
 }
 
-/// Apply a set of changes to one config, committing only if all of them
-/// succeeded. Each change is (section, option, Some(value) | None to delete).
+/// Apply a set of changes to one config atomically in a single lock/write.
+/// Each change is (section, option, Some(value) | None to delete).
 pub fn apply(
     config: &str,
     changes: &[(String, String, Option<String>)],
 ) -> Result<()> {
-    for (section, option, value) in changes {
-        let path = format!("{config}.{section}.{option}");
-        match value {
-            Some(v) => set(&path, v)?,
-            None => {
-                let _ = delete(&path);
+    with_doc(config, true, |doc| {
+        for (section, option, value) in changes {
+            if !util::valid_uci_section(section) || !util::valid_name(option) {
+                bail!("invalid uci path: {config}.{section}.{option}");
+            }
+            match value {
+                Some(v) => {
+                    let cleaned = util::clean_value(v)?.to_string();
+                    let Some(idx) = doc.resolve(section) else {
+                        bail!("uci section not found: {config}.{section}");
+                    };
+                    set_section_option(&mut doc.sections[idx], option, cleaned);
+                }
+                None => {
+                    if let Some(idx) = doc.resolve(section) {
+                        delete_section_item(&mut doc.sections[idx], option);
+                    }
+                }
             }
         }
-    }
-    commit(config)
+        Ok(())
+    })
 }
 
 pub fn reload_service(service: &str) -> Result<()> {
@@ -325,5 +649,60 @@ config zone
         let redirect = cfg.section("@redirect[0]").unwrap();
         assert_eq!(redirect.kind, "redirect");
         assert!(redirect.bool("enabled"));
+    }
+
+    #[test]
+    fn native_writer_handles_named_anonymous_lists_quotes_and_delete() {
+        let _guard = UCI_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = format!("/tmp/routerd-uci-test-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = format!("{dir}/testcfg");
+        std::fs::write(
+            &path,
+            "config interface 'lan'\n\toption proto 'static'\n\tlist ports 'eth1'\n\nconfig rule\n\toption name 'r0'\n",
+        )
+        .unwrap();
+        drop(_guard);
+
+        std::env::set_var("ROUTERD_UCI_DIR", &dir);
+
+        // Named set, quote escaping, list replacement
+        apply(
+            "testcfg",
+            &[
+                ("lan".into(), "ipaddr".into(), Some("10.2.2.1".into())),
+                ("lan".into(), "note".into(), Some("it's ok".into())),
+                ("lan".into(), "proto".into(), None),
+            ],
+        )
+        .unwrap();
+        set_list("testcfg", "lan", "ports", &["eth0", "eth1"]).unwrap();
+
+        // Anonymous add & @kind[idx] update
+        let sec = add("testcfg", "rule").unwrap();
+        assert_eq!(sec, "@rule[1]");
+        set_opt("testcfg", "@rule[1]", "name", "r1").unwrap();
+        set("testcfg.extra=include", "include").unwrap_err();
+        set("testcfg.extra", "include").unwrap();
+        set_opt("testcfg", "extra", "enabled", "1").unwrap();
+
+        let loaded = load("testcfg").unwrap();
+        let lan = loaded.section("lan").unwrap();
+        assert_eq!(lan.get("ipaddr"), Some("10.2.2.1"));
+        assert_eq!(lan.get("note"), Some("it's ok"));
+        assert_eq!(lan.get("proto"), None);
+        assert_eq!(lan.get("ports"), Some("eth0 eth1"));
+        assert_eq!(loaded.section("@rule[1]").unwrap().get("name"), Some("r1"));
+        assert_eq!(loaded.section("extra").unwrap().kind, "include");
+        assert!(loaded.section("extra").unwrap().bool("enabled"));
+
+        delete("testcfg.@rule[0]").unwrap();
+        let after_del = load("testcfg").unwrap();
+        assert_eq!(after_del.section("@rule[0]").unwrap().get("name"), Some("r1"));
+        assert!(after_del.section("@rule[1]").is_none());
+
+        std::env::remove_var("ROUTERD_UCI_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

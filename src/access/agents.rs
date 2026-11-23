@@ -11,6 +11,7 @@ use crate::util;
 
 pub const SCOPE_READ: &str = "devices:read";
 pub const SCOPE_WRITE: &str = "devices:write";
+pub const SCOPE_EXEC: &str = "system:exec";
 
 fn default_true() -> bool {
     true
@@ -55,7 +56,9 @@ pub fn normalize_scopes(input: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for scope in input {
         let s = scope.trim();
-        if (s == SCOPE_READ || s == SCOPE_WRITE) && !out.iter().any(|x| x == s) {
+        if (s == SCOPE_READ || s == SCOPE_WRITE || s == SCOPE_EXEC)
+            && !out.iter().any(|x| x == s)
+        {
             out.push(s.to_string());
         }
     }
@@ -73,6 +76,10 @@ pub fn can_read(scopes: &[String]) -> bool {
 
 pub fn can_write(scopes: &[String]) -> bool {
     scopes.iter().any(|s| s == SCOPE_WRITE)
+}
+
+pub fn can_exec(scopes: &[String]) -> bool {
+    scopes.iter().any(|s| s == SCOPE_EXEC)
 }
 
 fn sha256_hex(data: &str) -> String {
@@ -231,7 +238,16 @@ mod tests {
         let scopes = normalize_scopes(&["devices:write".into(), "bogus".into()]);
         assert_eq!(scopes, vec!["devices:write"]);
         assert!(can_read(&scopes));
+        assert!(!can_exec(&scopes));
+
         let read_only = normalize_scopes(&[SCOPE_READ.into()]);
         assert!(!can_write(&read_only));
+        assert!(!can_exec(&read_only));
+
+        let exec_only = normalize_scopes(&[SCOPE_EXEC.into(), SCOPE_EXEC.into(), "bogus".into()]);
+        assert_eq!(exec_only, vec!["system:exec"]);
+        assert!(can_exec(&exec_only));
+        assert!(!can_read(&exec_only));
+        assert!(!can_write(&exec_only));
     }
 }

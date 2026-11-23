@@ -87,9 +87,9 @@ pub fn interfaces() -> Vec<Value> {
             })
             .unwrap_or_default();
         let uptime = it
-            .get("data")
-            .and_then(|d| d.get("uptime"))
-            .and_then(|v| v.as_u64());
+            .get("uptime")
+            .and_then(|v| v.as_u64())
+            .or_else(|| it.get("data").and_then(|d| d.get("uptime")).and_then(|v| v.as_u64()));
         let stats = it
             .get("statistics")
             .cloned()
@@ -136,29 +136,20 @@ pub fn wan_summary() -> Value {
 }
 
 pub fn routes() -> Vec<Value> {
-    let out = util::run_ok("ip", &["-4", "route", "show"]).unwrap_or_default();
-    let mut result = Vec::new();
-    for line in out.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.is_empty() {
-            continue;
-        }
-        let mut r = json!({"target": f[0], "gateway": "", "device": "", "metric": 0, "proto": "", "source": ""});
-        let mut i = 1;
-        while i + 1 < f.len() {
-            match f[i] {
-                "via" => r["gateway"] = json!(f[i + 1]),
-                "dev" => r["device"] = json!(f[i + 1]),
-                "metric" => r["metric"] = json!(f[i + 1].parse::<u32>().unwrap_or(0)),
-                "proto" => r["proto"] = json!(f[i + 1]),
-                "src" => r["source"] = json!(f[i + 1]),
-                _ => {}
-            }
-            i += 2;
-        }
-        result.push(r);
-    }
-    result
+    crate::openwrt::rtnetlink::list_ipv4_routes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            json!({
+                "target": r.target,
+                "gateway": r.gateway,
+                "device": r.device,
+                "metric": r.metric,
+                "proto": r.proto,
+                "source": r.source,
+            })
+        })
+        .collect()
 }
 
 pub fn arp_table() -> Vec<Value> {
@@ -323,10 +314,10 @@ pub fn get_physical_ports() -> Vec<PhysicalPort> {
             .parse::<u64>()
             .unwrap_or(0);
 
-        let is_wan = dev == wan_dev || dev == "wan" || dev == "eth1";
+        let is_wan = dev == wan_dev;
         let label = if is_wan {
             "WAN 口".to_string()
-        } else if dev == "eth0" {
+        } else if dev == "eth0" || dev == "eth1" {
             "LAN 口".to_string()
         } else {
             dev.to_uppercase()
@@ -369,17 +360,11 @@ pub fn get_pppoe_logs(lines: usize) -> String {
 }
 
 pub fn redial_wan() -> anyhow::Result<()> {
-    let _ = Command::new("ubus")
-        .args(["call", "network.interface.wan", "down"])
-        .status();
+    let _ = ubus::call("network.interface.wan", "down", None);
     std::thread::sleep(std::time::Duration::from_millis(800));
-    let status = Command::new("ubus")
-        .args(["call", "network.interface.wan", "up"])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("ubus up 调用失败");
-    }
-    Ok(())
+    ubus::call("network.interface.wan", "up", None)
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("ubus up 调用失败: {e:#}"))
 }
 
 fn read_uci_option(pkg: &str, section: &str, opt: &str) -> Option<String> {

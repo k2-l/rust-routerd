@@ -316,11 +316,23 @@ pub async fn handle_dns_packet(
         }
     }
 
-    let dns_outbound = if matched_kind != "direct" && matched_kind != "block" && core.outbound_kind(matched_ob).is_some() {
-        matched_ob
-    } else {
-        &dns_ctx.proxy_outbound
-    };
+    let configured_dns_ob = (!dns_ctx.proxy_outbound.is_empty()
+        && !matches!(
+            core.outbound_kind(&dns_ctx.proxy_outbound),
+            None | Some("direct") | Some("block")
+        ))
+    .then_some(dns_ctx.proxy_outbound.as_str());
+
+    let dns_outbound = configured_dns_ob.unwrap_or_else(|| {
+        if matched_kind != "direct"
+            && matched_kind != "block"
+            && core.outbound_kind(matched_ob).is_some()
+        {
+            matched_ob
+        } else {
+            &dns_ctx.proxy_outbound
+        }
+    });
     forward_proxy_dns(pkt, dns_outbound, dns_ctx.proxy_upstream, core).await
 }
 
@@ -366,27 +378,23 @@ async fn forward_proxy_dns(
     Ok(rbuf)
 }
 
-/// Link or unlink ImmortalWrt `dnsmasq-full` upstream to our local DNS server (`127.0.0.1#<port>`).
+/// Link or unlink ImmortalWrt `dnsmasq` upstream to our local DNS server (`127.0.0.1#<port>`).
 pub fn sync_dnsmasq(cfg: &DnsConfig, singbox_enabled: bool, sim: bool) -> Result<()> {
     if sim {
         return Ok(());
     }
-    let bin = uci::bin();
     if singbox_enabled && cfg.enabled && cfg.link_dnsmasq {
         let listen: SocketAddr = cfg.listen.parse().context("invalid dns listen addr")?;
         let upstream = format!("127.0.0.1#{}", listen.port());
-        util::run(bin, &["set", "dhcp.@dnsmasq[0].noresolv=1"])?;
-        let _ = util::run_ok(bin, &["-q", "delete", "dhcp.@dnsmasq[0].server"]);
-        util::run(bin, &["add_list", &format!("dhcp.@dnsmasq[0].server={upstream}")])?;
-        util::run(bin, &["commit", "dhcp"])?;
+        uci::set_opt("dhcp", "@dnsmasq[0]", "noresolv", "1")?;
+        uci::set_list("dhcp", "@dnsmasq[0]", "server", &[&upstream])?;
         let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
     } else {
         let uci_cfg = uci::load("dhcp").unwrap_or_default();
         if let Some(sec) = uci_cfg.sections.iter().find(|s| s.kind == "dnsmasq") {
             if sec.get("noresolv") == Some("1") {
-                let _ = util::run_ok(bin, &["set", "dhcp.@dnsmasq[0].noresolv=0"]);
-                let _ = util::run_ok(bin, &["-q", "delete", "dhcp.@dnsmasq[0].server"]);
-                let _ = util::run_ok(bin, &["commit", "dhcp"]);
+                let _ = uci::set_opt("dhcp", "@dnsmasq[0]", "noresolv", "0");
+                let _ = uci::delete("dhcp.@dnsmasq[0].server");
                 let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
             }
         }

@@ -350,6 +350,7 @@ pub fn sync_fw4(cfg: &SingboxConfig, data_dir: &str, sim: bool) -> Result<()> {
 
     util::write_atomic(&nft_path, rules.as_bytes(), 0o644)?;
     ensure_fw4_include(&nft_path)?;
+    disable_flow_offloading_if_active();
     ensure_policy_route(cfg.route_table)?;
     util::run("/etc/init.d/firewall", &["reload"])?;
     util::run("nft", &["list", "chain", "inet", "fw4", "routerd_tproxy_prerouting"])
@@ -357,8 +358,36 @@ pub fn sync_fw4(cfg: &SingboxConfig, data_dir: &str, sim: bool) -> Result<()> {
     Ok(())
 }
 
+/// Disable fw4 software/hardware flow offloading when TProxy is active so established flows do not bypass prerouting.
+fn disable_flow_offloading_if_active() {
+    if matches!(
+        util::read_trim("/sys/module/mt7915e/parameters/wed_enable").as_str(),
+        "Y" | "y" | "1"
+    ) {
+        tracing::info!(
+            "singbox TProxy active while mt7915e wed_enable=Y; disabling WED in System -> Memory/Performance Tuning frees ~40-55 MiB DMA memory"
+        );
+    }
+    let fw = uci::load("firewall").unwrap_or_default();
+    let Some(def) = fw.by_kind("defaults").next() else {
+        return;
+    };
+    let sw = def.bool("flow_offloading");
+    let hw = def.bool("flow_offloading_hw");
+    if !sw && !hw {
+        return;
+    }
+    let _ = uci::apply(
+        "firewall",
+        &[
+            ("@defaults[0]".into(), "flow_offloading".into(), Some("0".into())),
+            ("@defaults[0]".into(), "flow_offloading_hw".into(), Some("0".into())),
+        ],
+    );
+    tracing::info!("disabled firewall flow_offloading/flow_offloading_hw while singbox TProxy is active");
+}
+
 fn ensure_fw4_include(nft_path: &str) -> Result<()> {
-    let bin = uci::bin();
     let cfg = uci::load("firewall").unwrap_or_default();
     if let Some(s) = cfg.section(TPROXY_SEC) {
         let already_ok = s.kind == "include"
@@ -370,16 +399,19 @@ fn ensure_fw4_include(nft_path: &str) -> Result<()> {
             return Ok(());
         }
         if s.kind != "include" {
-            let _ = util::run_ok(bin, &["-q", "delete", &format!("firewall.{TPROXY_SEC}")]);
+            let _ = uci::delete(&format!("firewall.{TPROXY_SEC}"));
         }
     }
-    util::run(bin, &["set", &format!("firewall.{TPROXY_SEC}=include")])?;
-    let base = format!("firewall.{TPROXY_SEC}");
-    util::run(bin, &["set", &format!("{base}.type=nftables")])?;
-    util::run(bin, &["set", &format!("{base}.path={nft_path}")])?;
-    util::run(bin, &["set", &format!("{base}.position=table-append")])?;
-    util::run(bin, &["set", &format!("{base}.enabled=1")])?;
-    util::run(bin, &["commit", "firewall"])?;
+    uci::set(&format!("firewall.{TPROXY_SEC}"), "include")?;
+    uci::apply(
+        "firewall",
+        &[
+            (TPROXY_SEC.into(), "type".into(), Some("nftables".into())),
+            (TPROXY_SEC.into(), "path".into(), Some(nft_path.into())),
+            (TPROXY_SEC.into(), "position".into(), Some("table-append".into())),
+            (TPROXY_SEC.into(), "enabled".into(), Some("1".into())),
+        ],
+    )?;
     Ok(())
 }
 
@@ -387,26 +419,20 @@ fn remove_fw4_rules(route_table: u32, data_dir: &str) -> Result<()> {
     let _ = std::fs::remove_file(format!("{data_dir}/{TPROXY_FILE}"));
     let cfg = uci::load("firewall").unwrap_or_default();
     if cfg.section(TPROXY_SEC).is_some() {
-        let _ = util::run_ok(uci::bin(), &["-q", "delete", &format!("firewall.{TPROXY_SEC}")]);
-        let _ = util::run(uci::bin(), &["commit", "firewall"]);
+        let _ = uci::delete(&format!("firewall.{TPROXY_SEC}"));
         let _ = util::run("/etc/init.d/firewall", &["reload"]);
     }
-    let table = route_table.to_string();
-    let _ = util::run_ok("ip", &["rule", "del", "fwmark", "1", "lookup", &table]);
-    let _ = util::run_ok("ip", &["route", "flush", "table", &table]);
+    let _ = crate::openwrt::rtnetlink::del_fwmark_rule(1, route_table);
+    let _ = crate::openwrt::rtnetlink::flush_ipv4_route_table(route_table);
     Ok(())
 }
 
 fn ensure_policy_route(route_table: u32) -> Result<()> {
-    let table = route_table.to_string();
-    let _ = util::run_ok("ip", &["rule", "del", "fwmark", "1", "lookup", &table]);
-    util::run("ip", &["rule", "add", "fwmark", "1", "lookup", &table])
-        .context("ip rule add fwmark 1")?;
-    util::run(
-        "ip",
-        &["route", "replace", "local", "0.0.0.0/0", "dev", "lo", "table", &table],
-    )
-    .context("ip route replace local")?;
+    let _ = crate::openwrt::rtnetlink::del_fwmark_rule(1, route_table);
+    crate::openwrt::rtnetlink::add_fwmark_rule(1, route_table)
+        .context("rtnetlink rule add fwmark 1")?;
+    crate::openwrt::rtnetlink::replace_local_default_route("lo", route_table)
+        .context("rtnetlink route replace local")?;
     Ok(())
 }
 

@@ -16,7 +16,17 @@ pub struct Memory {
     pub buffers: u64,
     pub cached: u64,
     pub used: u64,
+    pub used_conservative: u64,
     pub percent: f64,
+    pub slab: u64,
+    pub slab_reclaimable: u64,
+    pub slab_unreclaimable: u64,
+    pub anon_pages: u64,
+    pub shmem: u64,
+    pub kernel_stack: u64,
+    pub page_tables: u64,
+    pub vmalloc_used: u64,
+    pub driver_dma: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,15 +95,22 @@ fn kb(value: &str) -> u64 {
     value.trim().parse::<u64>().unwrap_or(0) * 1024
 }
 
-pub fn read_meminfo() -> Value {
-    let text = util::read("/proc/meminfo");
+pub fn parse_meminfo(text: &str) -> Memory {
     let mut total = 0;
     let mut free = 0;
     let mut available = 0;
     let mut buffers = 0;
     let mut cached = 0;
-    let mut swap_total = 0;
-    let mut swap_free = 0;
+    let mut shmem = 0;
+    let mut slab = 0;
+    let mut slab_reclaimable = 0;
+    let mut slab_unreclaimable = 0;
+    let mut anon_pages = 0;
+    let mut kernel_stack = 0;
+    let mut page_tables = 0;
+    let mut vmalloc_used = 0;
+    let mut percpu = 0;
+
     for line in text.lines() {
         let mut it = line.split_whitespace();
         let Some(key) = it.next() else { continue };
@@ -104,40 +121,252 @@ pub fn read_meminfo() -> Value {
             "MemAvailable:" => available = kb(val),
             "Buffers:" => buffers = kb(val),
             "Cached:" => cached = kb(val),
-            "SwapTotal:" => swap_total = kb(val),
-            "SwapFree:" => swap_free = kb(val),
+            "Shmem:" => shmem = kb(val),
+            "Slab:" => slab = kb(val),
+            "SReclaimable:" => slab_reclaimable = kb(val),
+            "SUnreclaim:" => slab_unreclaimable = kb(val),
+            "AnonPages:" => anon_pages = kb(val),
+            "KernelStack:" => kernel_stack = kb(val),
+            "PageTables:" => page_tables = kb(val),
+            "VmallocUsed:" => vmalloc_used = kb(val),
+            "Percpu:" => percpu = kb(val),
             _ => {}
         }
     }
     if available == 0 {
         available = free + buffers + cached;
     }
-    let used = total.saturating_sub(available);
-    json!({
-        "total": total,
-        "free": free,
-        "available": available,
-        "buffers": buffers,
-        "cached": cached,
-        "used": used,
-        "percent": if total > 0 { used as f64 * 100.0 / total as f64 } else { 0.0 },
-        "swap_total": swap_total,
-        "swap_free": swap_free,
-        "swap_used": swap_total.saturating_sub(swap_free),
-    })
+    // Exclude reclaimable page cache and buffers, while keeping tmpfs Shmem counted as used.
+    let reclaimable_file_cache = cached.saturating_sub(shmem);
+    let used = total
+        .saturating_sub(free)
+        .saturating_sub(buffers)
+        .saturating_sub(reclaimable_file_cache);
+    let used_conservative = total.saturating_sub(available);
+    let accounted_kernel =
+        anon_pages + slab + kernel_stack + page_tables + vmalloc_used + percpu + shmem;
+    let driver_dma = used.saturating_sub(accounted_kernel);
+    let percent = if total > 0 {
+        used as f64 * 100.0 / total as f64
+    } else {
+        0.0
+    };
+
+    Memory {
+        total,
+        free,
+        available,
+        buffers,
+        cached,
+        used,
+        used_conservative,
+        percent,
+        slab,
+        slab_reclaimable,
+        slab_unreclaimable,
+        anon_pages,
+        shmem,
+        kernel_stack,
+        page_tables,
+        vmalloc_used,
+        driver_dma,
+    }
+}
+
+pub fn read_meminfo() -> Value {
+    serde_json::to_value(memory()).unwrap_or_else(|_| json!({}))
 }
 
 pub fn memory() -> Memory {
-    let v = read_meminfo();
-    Memory {
-        total: v["total"].as_u64().unwrap_or(0),
-        free: v["free"].as_u64().unwrap_or(0),
-        available: v["available"].as_u64().unwrap_or(0),
-        buffers: v["buffers"].as_u64().unwrap_or(0),
-        cached: v["cached"].as_u64().unwrap_or(0),
-        used: v["used"].as_u64().unwrap_or(0),
-        percent: v["percent"].as_f64().unwrap_or(0.0),
+    parse_meminfo(&util::read("/proc/meminfo"))
+}
+
+pub fn top_processes(limit: usize) -> Vec<Value> {
+    struct ProcMem {
+        pid: u32,
+        name: String,
+        rss_bytes: u64,
+        anon_bytes: u64,
+        file_bytes: u64,
     }
+
+    let mut list = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(pid_str) = fname.to_str() else {
+            continue;
+        };
+        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+
+        let mut name = String::new();
+        let mut rss_kb = 0u64;
+        let mut anon_kb = 0u64;
+        let mut file_kb = 0u64;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("Name:") {
+                name = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("VmRSS:") {
+                rss_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("RssAnon:") {
+                anon_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("RssFile:") {
+                file_kb = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+        if rss_kb == 0 {
+            continue;
+        }
+        list.push(ProcMem {
+            pid,
+            name,
+            rss_bytes: rss_kb * 1024,
+            anon_bytes: anon_kb * 1024,
+            file_bytes: file_kb * 1024,
+        });
+    }
+
+    list.sort_by(|a, b| {
+        b.anon_bytes
+            .cmp(&a.anon_bytes)
+            .then_with(|| b.rss_bytes.cmp(&a.rss_bytes))
+    });
+    list.truncate(limit.clamp(1, 30));
+    list.into_iter()
+        .map(|p| {
+            json!({
+                "pid": p.pid,
+                "name": p.name,
+                "rss_bytes": p.rss_bytes,
+                "anon_bytes": p.anon_bytes,
+                "file_bytes": p.file_bytes,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TuningConfig {
+    pub wed_enabled: bool,
+    pub wed_active: bool,
+    pub wed_reboot_required: bool,
+    pub min_free_kbytes: u64,
+    pub dnsmasq_cachesize: u64,
+}
+
+fn read_wed_config() -> bool {
+    let text = util::read("/etc/modules.d/mt7915e");
+    text.contains("wed_enable=Y") || text.contains("wed_enable=1")
+}
+
+fn read_wed_active() -> bool {
+    let val = util::read_trim("/sys/module/mt7915e/parameters/wed_enable");
+    matches!(val.as_str(), "Y" | "y" | "1")
+}
+
+fn read_min_free_kbytes() -> u64 {
+    util::read_trim("/proc/sys/vm/min_free_kbytes")
+        .parse::<u64>()
+        .unwrap_or(16384)
+}
+
+fn read_dnsmasq_cachesize() -> u64 {
+    crate::openwrt::uci::load("dhcp")
+        .ok()
+        .and_then(|cfg| {
+            cfg.by_kind("dnsmasq")
+                .next()
+                .and_then(|s| s.get("cachesize"))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(8000)
+}
+
+pub fn get_tuning() -> TuningConfig {
+    let wed_enabled = read_wed_config();
+    let wed_active = read_wed_active();
+    TuningConfig {
+        wed_enabled,
+        wed_active,
+        wed_reboot_required: wed_enabled != wed_active,
+        min_free_kbytes: read_min_free_kbytes(),
+        dnsmasq_cachesize: read_dnsmasq_cachesize(),
+    }
+}
+
+pub fn set_tuning(
+    wed_enabled: Option<bool>,
+    min_free_kbytes: Option<u64>,
+    dnsmasq_cachesize: Option<u64>,
+) -> anyhow::Result<TuningConfig> {
+    if let Some(wed) = wed_enabled {
+        let val = if wed { "Y" } else { "N" };
+        util::write_atomic(
+            "/etc/modules.d/mt7915e",
+            format!("mt7915e wed_enable={val}\n").as_bytes(),
+            0o644,
+        )?;
+    }
+
+    if let Some(mf) = min_free_kbytes {
+        if !(4096..=32768).contains(&mf) {
+            anyhow::bail!("min_free_kbytes 必须在 4096..=32768 KB 之间");
+        }
+        std::fs::write("/proc/sys/vm/min_free_kbytes", format!("{mf}\n"))?;
+        let existing = util::read("/etc/sysctl.conf");
+        let mut lines: Vec<String> = Vec::new();
+        let mut replaced = false;
+        for line in existing.lines() {
+            if line.trim_start().starts_with("vm.min_free_kbytes") {
+                if !replaced {
+                    lines.push(format!("vm.min_free_kbytes={mf}"));
+                    replaced = true;
+                }
+            } else {
+                lines.push(line.to_string());
+            }
+        }
+        if !replaced {
+            lines.push(format!("vm.min_free_kbytes={mf}"));
+        }
+        let mut out = lines.join("\n");
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        util::write_atomic("/etc/sysctl.conf", out.as_bytes(), 0o644)?;
+    }
+
+    if let Some(cs) = dnsmasq_cachesize {
+        if !(150..=10000).contains(&cs) {
+            anyhow::bail!("dnsmasq cachesize 必须在 150..=10000 之间");
+        }
+        crate::openwrt::uci::set_opt("dhcp", "@dnsmasq[0]", "cachesize", &cs.to_string())?;
+        crate::openwrt::uci::reload_service("dnsmasq")?;
+    }
+
+    Ok(get_tuning())
 }
 
 pub fn uptime_secs() -> u64 {
@@ -425,6 +654,8 @@ pub fn system_info(info: &StaticInfo, cpu_usage: f64, rx_kbps: f64, tx_kbps: f64
 pub struct Sample {
     pub cpu: f64,
     pub mem: f64,
+    pub mem_used: u64,
+    pub mem_total: u64,
     pub rx: f64,
     pub tx: f64,
 }
@@ -455,6 +686,8 @@ impl History {
         self.samples.back().copied().unwrap_or(Sample {
             cpu: 0.0,
             mem: 0.0,
+            mem_used: 0,
+            mem_total: 0,
             rx: 0.0,
             tx: 0.0,
         })
@@ -487,7 +720,8 @@ impl History {
         };
         self.last_cpu = Some((total, idle));
 
-        let mem = memory().percent;
+        let mem_info = memory();
+        let mem = mem_info.percent;
         let (rxb, txb) = traffic_counters();
         let now = Instant::now();
         let (rx, tx) = match self.last_net {
@@ -505,6 +739,8 @@ impl History {
         let sample = Sample {
             cpu: (cpu * 10.0).round() / 10.0,
             mem: (mem * 10.0).round() / 10.0,
+            mem_used: mem_info.used,
+            mem_total: mem_info.total,
             rx: rx.round(),
             tx: tx.round(),
         };
@@ -590,4 +826,35 @@ pub fn spawn_sampler(history: SharedHistory) {
             .await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_meminfo_distinguishes_file_cache_and_driver_dma() {
+        let sample = "\
+MemTotal:         489616 kB
+MemFree:          335364 kB
+MemAvailable:     332488 kB
+Buffers:              52 kB
+Cached:            36964 kB
+AnonPages:          8480 kB
+Shmem:               232 kB
+Slab:              33180 kB
+SReclaimable:       6616 kB
+SUnreclaim:        26564 kB
+KernelStack:        1920 kB
+PageTables:          724 kB
+VmallocUsed:       11932 kB
+Percpu:              288 kB
+";
+        let m = parse_meminfo(sample);
+        assert_eq!(m.used_conservative, (489616 - 332488) * 1024);
+        // 489616 - 335364 - 52 - (36964 - 232) = 117468 kB
+        assert_eq!(m.used, 117_468 * 1024);
+        assert_eq!(m.driver_dma, (117_468 - (8480 + 33180 + 1920 + 724 + 11932 + 288 + 232)) * 1024);
+        assert!(m.percent > 23.9 && m.percent < 24.1);
+    }
 }

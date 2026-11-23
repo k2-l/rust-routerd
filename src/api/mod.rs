@@ -151,6 +151,9 @@ fn protected_router(state: AppState) -> Router {
     Router::new()
         .route("/api/system", get(system::info))
         .route("/api/system/history", get(system::history))
+        .route("/api/system/processes", get(system::processes))
+        .route("/api/system/ntp/sync", post(system::ntp_sync))
+        .route("/api/system/tuning", get(system::get_tuning).put(system::update_tuning))
         .route("/api/events", get(system::events))
         .route("/api/system/reboot", post(system::reboot))
         .route("/api/system/factory-reset", post(system::factory_reset))
@@ -168,6 +171,10 @@ fn protected_router(state: AppState) -> Router {
         .route("/api/network/wan/redial", post(network::redial))
         .route("/api/network/wan/pppoe-log", get(network::pppoe_log))
         .route("/api/network/lan", put(network::update_lan))
+        .route(
+            "/api/network/dhcp/engine",
+            get(network::get_dhcp_engine).put(network::set_dhcp_engine),
+        )
         .route("/api/network/dhcp/hosts", post(network::add_static_lease))
         .route(
             "/api/network/dhcp/hosts/{section}",
@@ -243,8 +250,12 @@ fn agent_router(state: AppState) -> Router {
         // 全路由器各模块接管（读/写）
         .route("/api/agent/v1/system", get(system::info))
         .route("/api/agent/v1/system/history", get(system::history))
+        .route("/api/agent/v1/system/processes", get(system::processes))
+        .route("/api/agent/v1/system/ntp/sync", post(system::ntp_sync))
+        .route("/api/agent/v1/system/tuning", get(system::get_tuning).put(system::update_tuning))
         .route("/api/agent/v1/system/hostname", put(system::set_hostname))
         .route("/api/agent/v1/system/reboot", post(system::reboot))
+        .route("/api/agent/v1/system/exec", post(agent::system_exec))
         .route("/api/agent/v1/logs", get(system::logs))
         .route("/api/agent/v1/network", get(network::get))
         .route("/api/agent/v1/network/mode", get(network::get_mode).put(network::set_mode))
@@ -255,6 +266,10 @@ fn agent_router(state: AppState) -> Router {
         .route("/api/agent/v1/network/wan/redial", post(network::redial))
         .route("/api/agent/v1/network/wan/pppoe-log", get(network::pppoe_log))
         .route("/api/agent/v1/network/lan", put(network::update_lan))
+        .route(
+            "/api/agent/v1/network/dhcp/engine",
+            get(network::get_dhcp_engine).put(network::set_dhcp_engine),
+        )
         .route("/api/agent/v1/network/dhcp/hosts", post(network::add_static_lease))
         .route(
             "/api/agent/v1/network/dhcp/hosts/{section}",

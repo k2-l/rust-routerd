@@ -20,10 +20,12 @@ fn device_policies(state: &AppState, cfg: &SingboxConfig) -> Vec<Value> {
                 if r.src_mac.len() == 1
                     && normalize_mac(&r.src_mac[0]).as_deref() == Some(d.mac.as_str())
                     && r.ip_cidr.is_empty()
+                    && r.src_ip_cidr.is_empty()
                     && r.domain_suffix.is_empty()
                     && r.domain_exact.is_empty()
                     && r.domain_keyword.is_empty()
                     && r.port.is_empty()
+                    && r.network.is_empty()
                 {
                     Some(r.outbound.clone())
                 } else {
@@ -173,10 +175,12 @@ pub async fn set_device_policy(
         !(r.src_mac.len() == 1
             && normalize_mac(&r.src_mac[0]).as_deref() == Some(norm.as_str())
             && r.ip_cidr.is_empty()
+            && r.src_ip_cidr.is_empty()
             && r.domain_suffix.is_empty()
             && r.domain_exact.is_empty()
             && r.domain_keyword.is_empty()
-            && r.port.is_empty())
+            && r.port.is_empty()
+            && r.network.is_empty())
     });
 
     if let Some(ob) = req.outbound.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "default") {

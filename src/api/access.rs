@@ -16,7 +16,7 @@ fn nft_available() -> bool {
 }
 
 async fn sync(state: &AppState, snapshot: DeviceStore) -> ApiResult<()> {
-    if !snapshot.enforcement || state.sim {
+    if state.sim {
         return Ok(());
     }
     let data_dir = state.data_dir.to_string();
@@ -24,6 +24,16 @@ async fn sync(state: &AppState, snapshot: DeviceStore) -> ApiResult<()> {
         .await
         .map_err(|e| ApiError::internal(e.to_string()))??;
     Ok(())
+}
+
+fn audit_actor(
+    agent_ctx: Option<Extension<crate::api::agent::AgentContext>>,
+    peer_ip: std::net::IpAddr,
+) -> (String, String) {
+    match agent_ctx {
+        Some(Extension(ctx)) => (format!("agent:{}#{}", ctx.name, ctx.id), ctx.ip),
+        None => ("session:root".to_string(), peer_ip.to_string()),
+    }
 }
 
 pub async fn get(State(state): State<AppState>) -> Json<Value> {
@@ -55,9 +65,10 @@ pub async fn enforcement(
     Extension(PeerAddr(ip)): Extension<PeerAddr>,
     Json(body): Json<EnforcementBody>,
 ) -> ApiResult<Json<Value>> {
-    let (previous, changed, snapshot, counts) = {
+    let (previous, changed, before_snap, snapshot, counts) = {
         let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
         let _ = store.scan();
+        let before_snap = store.clone();
         let previous = store.enforcement;
         store.set_enforcement(body.enabled, body.authorize_current);
         store
@@ -66,6 +77,7 @@ pub async fn enforcement(
         (
             previous,
             previous != body.enabled,
+            before_snap,
             store.clone(),
             store.summary(),
         )
@@ -73,24 +85,16 @@ pub async fn enforcement(
     let data_dir = state.data_dir.to_string();
     let sim = state.sim;
     let result = if changed {
-        tokio::task::spawn_blocking(move || {
-            if body.enabled {
-                nft::enable(&snapshot, &data_dir, sim)
-            } else {
-                nft::disable(&data_dir, sim)
-            }
-        })
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
+        tokio::task::spawn_blocking(move || nft::reconfigure(&snapshot, &data_dir, sim))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
     } else {
         Ok(())
     };
     if let Err(e) = result {
-        if body.enabled {
-            let data_dir = state.data_dir.to_string();
-            let sim = state.sim;
-            let _ = tokio::task::spawn_blocking(move || nft::disable(&data_dir, sim)).await;
-        }
+        let rb_dir = state.data_dir.to_string();
+        let _ = tokio::task::spawn_blocking(move || nft::reconfigure(&before_snap, &rb_dir, sim))
+            .await;
         let mut store = state.access.write().unwrap_or_else(|e| e.into_inner());
         store.enforcement = previous;
         let _ = store.save(&format!("{}/access.json", state.data_dir));
@@ -221,9 +225,11 @@ pub struct RateLimitBody {
 pub async fn rate_limit(
     State(state): State<AppState>,
     Extension(PeerAddr(ip)): Extension<PeerAddr>,
+    agent_ctx: Option<Extension<crate::api::agent::AgentContext>>,
     Path(mac): Path<String>,
     Json(body): Json<RateLimitBody>,
 ) -> ApiResult<Json<Value>> {
+    let (actor, audit_ip) = audit_actor(agent_ctx, ip);
     let mac = normalize_mac(&mac).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
     let rx = body.rx_limit_kbps.min(10_000_000);
     let tx = body.tx_limit_kbps.min(10_000_000);
@@ -245,11 +251,11 @@ pub async fn rate_limit(
 
     agents::audit(
         &state.data_dir,
-        "session:root",
+        &actor,
         "rate_limit",
         &device.mac,
         &format!("rx={rx}kbps,tx={tx}kbps"),
-        &ip.to_string(),
+        &audit_ip,
     );
     Ok(ok(json!({ "device": device.view(now_unix()) })))
 }
@@ -263,9 +269,11 @@ pub struct KickBody {
 pub async fn kick(
     State(state): State<AppState>,
     Extension(PeerAddr(ip)): Extension<PeerAddr>,
+    agent_ctx: Option<Extension<crate::api::agent::AgentContext>>,
     Path(mac): Path<String>,
     body: Option<Json<KickBody>>,
 ) -> ApiResult<Json<Value>> {
+    let (actor, audit_ip) = audit_actor(agent_ctx, ip);
     let mac = normalize_mac(&mac).ok_or_else(|| ApiError::bad("MAC 地址格式无效"))?;
     let ban_ms = body
         .and_then(|Json(b)| b.ban_secs)
@@ -296,11 +304,11 @@ pub async fn kick(
 
     agents::audit(
         &state.data_dir,
-        "session:root",
+        &actor,
         "kick",
         &mac,
         &format!("wifi_deauth={wifi_deauth},conntrack={conntrack_flushed}"),
-        &ip.to_string(),
+        &audit_ip,
     );
     Ok(ok(json!({
         "kicked": true,
@@ -316,7 +324,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Value> {
     let store = state.agents.read().unwrap_or_else(|e| e.into_inner());
     ok(json!({
         "tokens": store.views(),
-        "scopes": [agents::SCOPE_READ, agents::SCOPE_WRITE],
+        "scopes": [agents::SCOPE_READ, agents::SCOPE_WRITE, agents::SCOPE_EXEC],
     }))
 }
 
@@ -345,7 +353,7 @@ pub async fn create_agent(
         "session:root",
         "agent.create",
         &entry.id,
-        "ok",
+        &entry.scopes.join(","),
         "",
     );
     Ok(ok(json!({

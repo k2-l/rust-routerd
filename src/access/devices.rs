@@ -383,6 +383,14 @@ impl DeviceStore {
             .collect()
     }
 
+    pub fn blocked_macs(&self) -> Vec<String> {
+        self.devices
+            .values()
+            .filter(|d| d.blocked)
+            .map(|d| d.mac.clone())
+            .collect()
+    }
+
     pub fn summary(&self) -> Value {
         let now = now_unix();
         let mut pending = 0;

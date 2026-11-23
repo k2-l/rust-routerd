@@ -4,33 +4,8 @@ use serde_json::{json, Value};
 use crate::openwrt::ubus;
 use crate::util;
 
-fn iwinfo_devices() -> Vec<String> {
-    ubus::call_ok("iwinfo", "devices", None)
-        .and_then(|v| v.get("devices").and_then(|d| d.as_array()).cloned())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn iwinfo_info(dev: &str) -> Option<Value> {
-    ubus::call_ok("iwinfo", "info", Some(&json!({"device": dev}).to_string()))
-}
-
-fn iwinfo_assoc(dev: &str) -> Vec<Value> {
-    ubus::call_ok(
-        "iwinfo",
-        "assoclist",
-        Some(&json!({"device": dev}).to_string()),
-    )
-    .and_then(|v| v.get("results").and_then(|r| r.as_array()).cloned())
-    .unwrap_or_default()
-}
-
-fn infer_live_band(info: &Value) -> &'static str {
-    if let Some(freq) = info.get("frequency").and_then(|v| v.as_u64()) {
+fn infer_live_band(frequency: Option<u32>, channel: Option<u32>) -> &'static str {
+    if let Some(freq) = frequency {
         if freq >= 5925 {
             return "6g";
         } else if freq >= 4900 {
@@ -39,7 +14,7 @@ fn infer_live_band(info: &Value) -> &'static str {
             return "2g";
         }
     }
-    if let Some(ch) = info.get("channel").and_then(|v| v.as_u64()) {
+    if let Some(ch) = channel {
         if ch > 14 {
             return "5g";
         } else if ch >= 1 {
@@ -47,6 +22,19 @@ fn infer_live_band(info: &Value) -> &'static str {
         }
     }
     ""
+}
+
+fn rate_to_json(r: &crate::openwrt::nl80211::RateInfo) -> Value {
+    json!({
+        "rate": r.rate_kbps,
+        "mcs": r.mcs,
+        "nss": r.nss,
+        "mhz": r.mhz,
+        "short_gi": r.short_gi,
+        "ht": r.ht,
+        "vht": r.vht,
+        "he": r.he,
+    })
 }
 
 /// Check if ARP entry is genuinely reachable (flags != 0x0) via /proc/net/arp
@@ -64,28 +52,84 @@ fn is_arp_reachable(ip: &str) -> bool {
 }
 
 pub fn live() -> Vec<Value> {
-    let mut out = Vec::new();
-    for dev in iwinfo_devices() {
-        let info = iwinfo_info(&dev).unwrap_or(Value::Null);
-        let assoc = iwinfo_assoc(&dev);
-        let band = infer_live_band(&info);
+    let ifaces = match crate::openwrt::nl80211::query_live() {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::debug!("nl80211 query_live failed: {e:#}");
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::with_capacity(ifaces.len());
+    for iface in ifaces {
+        let band = infer_live_band(iface.frequency, iface.channel);
+        let stations: Vec<Value> = iface
+            .stations
+            .iter()
+            .map(|s| {
+                let mut rx = rate_to_json(&s.rx_rate);
+                if let Some(obj) = rx.as_object_mut() {
+                    obj.insert("bytes".into(), json!(s.rx_bytes));
+                    obj.insert("packets".into(), json!(s.rx_packets));
+                    obj.insert("drop_misc".into(), json!(s.rx_drop_misc));
+                }
+                let mut tx = rate_to_json(&s.tx_rate);
+                if let Some(obj) = tx.as_object_mut() {
+                    obj.insert("bytes".into(), json!(s.tx_bytes));
+                    obj.insert("packets".into(), json!(s.tx_packets));
+                    obj.insert("retries".into(), json!(s.tx_retries));
+                    obj.insert("failed".into(), json!(s.tx_failed));
+                }
+                json!({
+                    "mac": s.mac,
+                    "signal": s.signal,
+                    "signal_avg": s.signal_avg,
+                    "noise": s.noise,
+                    "inactive": s.inactive_ms,
+                    "connected_time": s.connected_time,
+                    "rx": rx,
+                    "tx": tx,
+                })
+            })
+            .collect();
+
+        let sigs: Vec<i32> = iface.stations.iter().filter_map(|s| s.signal).collect();
+        let signal = if sigs.is_empty() {
+            None
+        } else {
+            Some((sigs.iter().map(|&v| i64::from(v)).sum::<i64>() / sigs.len() as i64) as i32)
+        };
+        let quality = signal.map(|sig| (sig + 110).clamp(0, 70));
+        let quality_max = signal.map(|_| 70);
+
+        let rates: Vec<u32> = iface
+            .stations
+            .iter()
+            .filter_map(|s| s.tx_rate.rate_kbps)
+            .collect();
+        let bitrate = if rates.is_empty() {
+            None
+        } else {
+            Some((rates.iter().map(|&v| u64::from(v)).sum::<u64>() / rates.len() as u64) as u32)
+        };
+
         out.push(json!({
-            "device": dev,
+            "device": iface.device,
             "band": band,
-            "ssid": info.get("ssid").cloned().unwrap_or(Value::Null),
-            "bssid": info.get("bssid").cloned().unwrap_or(Value::Null),
-            "mode": info.get("mode").cloned().unwrap_or(Value::Null),
-            "channel": info.get("channel").cloned().unwrap_or(Value::Null),
-            "frequency": info.get("frequency").cloned().unwrap_or(Value::Null),
-            "txpower": info.get("txpower").cloned().unwrap_or(Value::Null),
-            "signal": info.get("signal").cloned().unwrap_or(Value::Null),
-            "noise": info.get("noise").cloned().unwrap_or(Value::Null),
-            "bitrate": info.get("bitrate").cloned().unwrap_or(Value::Null),
-            "encryption": info.get("encryption").cloned().unwrap_or(Value::Null),
-            "quality": info.get("quality").cloned().unwrap_or(Value::Null),
-            "quality_max": info.get("quality_max").cloned().unwrap_or(Value::Null),
-            "assoc_count": assoc.len(),
-            "stations": assoc,
+            "ssid": iface.ssid,
+            "bssid": iface.bssid,
+            "mode": iface.mode,
+            "channel": iface.channel,
+            "frequency": iface.frequency,
+            "txpower": iface.txpower,
+            "signal": signal,
+            "noise": iface.noise,
+            "bitrate": bitrate,
+            "encryption": Value::Null,
+            "quality": quality,
+            "quality_max": quality_max,
+            "assoc_count": stations.len(),
+            "stations": stations,
         }));
     }
     out
@@ -343,7 +387,7 @@ pub fn bool_str(v: bool) -> String {
 /// Disconnect a client by MAC across all active `hostapd.*` interfaces (and optionally flush conntrack/ARP).
 pub fn kick_client(mac: &str, ip: Option<&str>, ban_ms: u64) -> (bool, bool) {
     let mut wifi_deauth = false;
-    if let Some(list) = util::run_ok("ubus", &["list", "hostapd.*"]) {
+    if let Ok(objs) = ubus::list(Some("hostapd.*")) {
         let payload = json!({
             "addr": mac,
             "reason": 5,
@@ -351,8 +395,8 @@ pub fn kick_client(mac: &str, ip: Option<&str>, ban_ms: u64) -> (bool, bool) {
             "ban_time": ban_ms,
         })
         .to_string();
-        for obj in list.lines().map(str::trim).filter(|l| l.starts_with("hostapd.")) {
-            if ubus::call_ok(obj, "del_client", Some(&payload)).is_some() {
+        for obj in objs.into_iter().filter(|l| l.starts_with("hostapd.")) {
+            if ubus::call_ok(&obj, "del_client", Some(&payload)).is_some() {
                 wifi_deauth = true;
             }
         }
@@ -360,13 +404,19 @@ pub fn kick_client(mac: &str, ip: Option<&str>, ban_ms: u64) -> (bool, bool) {
 
     let mut conntrack_flushed = false;
     if let Some(client_ip) = ip.filter(|s| !s.is_empty()) {
-        if util::run_ok("conntrack", &["-D", "-s", client_ip]).is_some() {
-            conntrack_flushed = true;
+        if let Ok(addr) = client_ip.parse::<std::net::Ipv4Addr>() {
+            conntrack_flushed =
+                matches!(crate::openwrt::conntrack::flush_ip(addr), Ok(n) if n > 0);
+            let lan_dev = crate::openwrt::uci::load("network")
+                .ok()
+                .and_then(|cfg| {
+                    cfg.section("lan")
+                        .and_then(|s| s.get("device").map(str::to_string))
+                })
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "br-lan".to_string());
+            let _ = crate::openwrt::rtnetlink::delete_ipv4_neigh(addr, &lan_dev);
         }
-        if util::run_ok("conntrack", &["-D", "-d", client_ip]).is_some() {
-            conntrack_flushed = true;
-        }
-        let _ = util::run_ok("ip", &["neigh", "del", client_ip, "dev", "br-lan"]);
     }
     (wifi_deauth, conntrack_flushed)
 }

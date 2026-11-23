@@ -24,7 +24,7 @@ ROOTDIR=$(find . -maxdepth 1 -type d -name 'sysupgrade-*' | head -1)
 [ -n "$ROOTDIR" ] || { echo "no sysupgrade-* directory in image"; exit 3; }
 cat "$ROOTDIR/CONTROL" 2>/dev/null || true
 
-unsquashfs -q -d rootfs "$ROOTDIR/root" >/dev/null
+unsquashfs -q -no-exit-code -d rootfs "$ROOTDIR/root" >/dev/null
 R="$WORK/verify/rootfs"
 
 fail=0
@@ -41,9 +41,23 @@ check "first-boot defaults" "[ -x '$R/etc/uci-defaults/99-routerd' ]"
 check "embedded UI not on disk" "[ ! -e '$R/www/luci-static' ]"
 
 echo
-echo "== stock web / ipv6 / opkg stacks removed =="
+echo "== stock web / ipv6 / opkg / replaced stacks removed =="
 check "no uhttpd binary" "[ ! -e '$R/usr/sbin/uhttpd' ]"
 check "no uhttpd packages in apk" "! grep -q '^P:uhttpd' '$R/lib/apk/db/installed'"
+check "no rpcd binary" "[ ! -e '$R/sbin/rpcd' ] && [ ! -e '$R/usr/sbin/rpcd' ]"
+check "no rpcd packages in apk" "! grep -q '^P:rpcd' '$R/lib/apk/db/installed'"
+check "no iwinfo package in apk" "! grep -q '^P:iwinfo\$' '$R/lib/apk/db/installed'"
+check "no conntrack binary" "[ ! -e '$R/usr/sbin/conntrack' ] && [ ! -e '$R/sbin/conntrack' ]"
+check "no conntrack CLI package in apk" "! grep -q '^P:conntrack\$' '$R/lib/apk/db/installed'"
+check "no ip-tiny binary" "[ ! -e '$R/usr/libexec/ip-tiny' ]"
+check "no ip-tiny package in apk" "! grep -q '^P:ip-tiny\$' '$R/lib/apk/db/installed'"
+check "no dnsmasq-full package in apk" "! grep -q '^P:dnsmasq-full\$' '$R/lib/apk/db/installed'"
+check "no libnettle8 / libgmp10 / libnetfilter-conntrack3" "! grep -qE '^P:(libnettle8|libgmp10|libnetfilter-conntrack3|libnfnetlink0)\$' '$R/lib/apk/db/installed'"
+check "no wpad-openssl (full) package in apk" "! grep -q '^P:wpad-openssl\$' '$R/lib/apk/db/installed'"
+check "no autocore package in apk" "! grep -q '^P:autocore\$' '$R/lib/apk/db/installed'"
+check "no kmod-nf-nathelper package in apk" "! grep -q '^P:kmod-nf-nathelper\$' '$R/lib/apk/db/installed'"
+check "no bridger / eBPF TC stack in apk" "! grep -qE '^P:(bridger|libbpf1|libelf1|kmod-sched-core)\$' '$R/lib/apk/db/installed'"
+check "no urngd package in apk" "! grep -q '^P:urngd\$' '$R/lib/apk/db/installed'"
 check "no LuCI packages in apk" "! grep -q '^P:luci' '$R/lib/apk/db/installed'"
 check "no LuCI lua tree" "[ ! -d '$R/usr/lib/lua/luci' ]"
 check "no LuCI www tree" "[ ! -d '$R/www/luci-static' ]"
@@ -54,7 +68,7 @@ check "apk database present" "[ -f '$R/lib/apk/db/installed' ]"
 
 echo
 echo "== required runtime packages (ImmortalWrt 25.12 apk) =="
-for p in apk-mbedtls libopenssl3 rpcd rpcd-mod-iwinfo ip-tiny iwinfo wpad-openssl uci ubus netifd dnsmasq-full firewall4 dropbear ppp ppp-mod-pppoe conntrack kmod-nft-tproxy; do
+for p in apk-openssl libopenssl3 iw wpad-basic-openssl uci ubus netifd dnsmasq firewall4 dropbear ppp ppp-mod-pppoe kmod-nf-conntrack-netlink kmod-nft-tproxy; do
 	check "package $p" "grep -q '^P:$p\$' '$R/lib/apk/db/installed'"
 done
 

@@ -143,6 +143,31 @@
         "parameters": [{ "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100 } }],
         "responses": { "200": { "description": "ok" } }
       }
+    },
+    "/system/exec": {
+      "post": {
+        "summary": "Execute a shell debug command (requires system:exec scope, disabled in simulation mode)",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "command": { "type": "string", "description": "Shell command passed to /bin/sh -c (max 4096 bytes)" },
+              "timeout_secs": { "type": "integer", "default": 15, "minimum": 1, "maximum": 60 },
+              "cwd": { "type": "string", "description": "Optional working directory (defaults to /root or /)" }
+            },
+            "required": ["command"]
+          }, "examples": {
+            "memoryTop": { "value": { "command": "free -m && ps -o pid,rss,comm | sort -k2 -nr | head -n 15", "timeout_secs": 10 } }
+          } } }
+        },
+        "responses": {
+          "200": { "description": "Command completed or timed out (check exit_code / timed_out / stdout / stderr)" },
+          "400": { "description": "Invalid command or cwd" },
+          "403": { "description": "Missing system:exec scope or simulation mode" },
+          "429": { "description": "Rate limit or concurrent exec limit exceeded" }
+        }
+      }
     }
   }
 }

@@ -20,8 +20,134 @@ if ! grep -Eq '25\.12' "$IB/include/version.mk" "$IB/.config" "$IB/repositories"
 	exit 1
 fi
 
-REMOVE="-luci -luci-light -luci-base -luci-app-firewall -luci-app-package-manager -luci-lib-base -luci-lib-apk -luci-lib-uqr -luci-i18n-base-zh-cn -luci-mod-admin-full -luci-mod-network -luci-mod-status -luci-mod-system -luci-proto-ipv6 -luci-proto-ppp -luci-theme-bootstrap -luci-compat -rpcd-mod-luci -rpcd-mod-rrdns -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua -odhcp6c -odhcpd-ipv6only"
-ADD="libopenssl3 ip-tiny rpcd rpcd-mod-iwinfo conntrack kmod-nft-tproxy"
+REMOVE="-luci -luci-light -luci-base -luci-app-firewall -luci-app-package-manager -luci-lib-base -luci-lib-apk -luci-lib-uqr -luci-i18n-base-zh-cn -luci-mod-admin-full -luci-mod-network -luci-mod-status -luci-mod-system -luci-proto-ipv6 -luci-proto-ppp -luci-theme-bootstrap -luci-compat -rpcd -rpcd-mod-iwinfo -rpcd-mod-file -rpcd-mod-ucode -rpcd-mod-luci -rpcd-mod-rrdns -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua -odhcp6c -odhcpd-ipv6only -conntrack -ip-tiny -dnsmasq-full -wpad-openssl -autocore -kmod-nf-nathelper -bridger -urngd"
+ADD="libopenssl3 kmod-nf-conntrack-netlink kmod-nft-tproxy dnsmasq wpad-basic-openssl"
+
+WGET_SHIM_DIR=""
+cleanup_wget_shim() {
+	if [ -n "${WGET_SHIM_DIR:-}" ] && [ -d "$WGET_SHIM_DIR" ]; then
+		rm -rf "$WGET_SHIM_DIR"
+	fi
+}
+trap cleanup_wget_shim EXIT
+
+# Container images without wget still ship curl; bridge apk fetches cleanly when online.
+if ! command -v wget >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
+	WGET_SHIM_DIR="$(mktemp -d)"
+	cat >"$WGET_SHIM_DIR/wget" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+curl_args=(-fsSL)
+url=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-qO-)
+			shift
+			;;
+		-qO)
+			[ "${2:-}" = "-" ] || curl_args+=(-o "${2:?}")
+			shift 2
+			;;
+		-qO*)
+			dest="${1#-qO}"
+			[ "$dest" = "-" ] || curl_args+=(-o "$dest")
+			shift
+			;;
+		-O)
+			[ "${2:-}" = "-" ] || curl_args+=(-o "${2:?}")
+			shift 2
+			;;
+		-O*)
+			dest="${1#-O}"
+			[ "$dest" = "-" ] || curl_args+=(-o "$dest")
+			shift
+			;;
+		--output-document=*)
+			dest="${1#--output-document=}"
+			[ "$dest" = "-" ] || curl_args+=(-o "$dest")
+			shift
+			;;
+		--output-document)
+			[ "${2:-}" = "-" ] || curl_args+=(-o "${2:?}")
+			shift 2
+			;;
+		-T)
+			tval="${2:?}"
+			curl_args+=(--connect-timeout "$tval" --speed-limit 1 --speed-time "$tval")
+			shift 2
+			;;
+		-T*)
+			tval="${1#-T}"
+			curl_args+=(--connect-timeout "$tval" --speed-limit 1 --speed-time "$tval")
+			shift
+			;;
+		--timeout=*)
+			tval="${1#--timeout=}"
+			curl_args+=(--connect-timeout "$tval" --speed-limit 1 --speed-time "$tval")
+			shift
+			;;
+		--timeout)
+			tval="${2:?}"
+			curl_args+=(--connect-timeout "$tval" --speed-limit 1 --speed-time "$tval")
+			shift 2
+			;;
+		--header=*)
+			curl_args+=(-H "${1#--header=}")
+			shift
+			;;
+		--header)
+			curl_args+=(-H "${2:?}")
+			shift 2
+			;;
+		-U)
+			curl_args+=(-A "${2:?}")
+			shift 2
+			;;
+		-U*)
+			curl_args+=(-A "${1#-U}")
+			shift
+			;;
+		--user-agent=*)
+			curl_args+=(-A "${1#--user-agent=}")
+			shift
+			;;
+		--user-agent)
+			curl_args+=(-A "${2:?}")
+			shift 2
+			;;
+		-t|--tries)
+			shift 2
+			;;
+		-t*|--tries=*)
+			shift
+			;;
+		-q|--quiet|--no-check-certificate|-S|--server-response|-nv|--no-verbose|-c|--continue|-N|--timestamping)
+			shift
+			;;
+		-4|-6)
+			curl_args+=("$1")
+			shift
+			;;
+		--)
+			shift
+			[ $# -gt 0 ] && url="$1"
+			break
+			;;
+		-*)
+			shift
+			;;
+		*)
+			url="$1"
+			shift
+			;;
+	esac
+done
+[ -n "$url" ] || { echo "wget-shim: missing URL" >&2; exit 2; }
+exec curl "${curl_args[@]}" "$url"
+EOF
+	chmod 0755 "$WGET_SHIM_DIR/wget"
+	export PATH="$WGET_SHIM_DIR:$PATH"
+fi
 
 mkdir -p "$OUT"
 cd "$IB"

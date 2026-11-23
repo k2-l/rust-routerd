@@ -9,7 +9,7 @@ use crate::access::devices::normalize_mac;
 use crate::state::AppState;
 
 use super::{ok, ApiError, ApiResult};
-use crate::openwrt::{net, uci};
+use crate::openwrt::{dhcp, net, uci};
 use crate::util;
 
 fn wan_value() -> Value {
@@ -33,11 +33,16 @@ fn wan_value() -> Value {
     })
 }
 
-fn lan_value() -> Value {
+fn lan_value(dhcp_status: &dhcp::DhcpStatus) -> Value {
     let cfg = uci::load("network").unwrap_or_default();
     let s = cfg.section("lan").cloned().unwrap_or_default();
-    let dhcp = uci::load("dhcp").unwrap_or_default();
-    let d = dhcp.section("lan").cloned().unwrap_or_default();
+    let dhcp_cfg = uci::load("dhcp").unwrap_or_default();
+    let d = dhcp_cfg.section("lan").cloned().unwrap_or_default();
+    let effective_ignore = if dhcp_status.active_engine == dhcp::DhcpEngine::Routerd {
+        dhcp_status.disabled
+    } else {
+        d.bool("ignore")
+    };
     json!({
         "section": if s.name.is_empty() { "lan".to_string() } else { s.name.clone() },
         "ipaddr": s.get_or("ipaddr", "192.168.1.1"),
@@ -48,7 +53,7 @@ fn lan_value() -> Value {
             "start": d.get_or("start", "100"),
             "limit": d.get_or("limit", "150"),
             "leasetime": d.get_or("leasetime", "12h"),
-            "ignore": d.bool("ignore"),
+            "ignore": effective_ignore,
         },
         "dns": d.get_or("dns", ""),
     })
@@ -81,11 +86,13 @@ fn custom_hosts_value() -> Vec<Value> {
         .collect()
 }
 
-pub async fn get() -> ApiResult<Json<Value>> {
-    let data = tokio::task::spawn_blocking(|| {
+pub async fn get(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let dhcp_status = state.dhcp.status();
+    let dhcp_status_for_lan = dhcp_status.clone();
+    let data = tokio::task::spawn_blocking(move || {
         json!({
             "wan": wan_value(),
-            "lan": lan_value(),
+            "lan": lan_value(&dhcp_status_for_lan),
             "wan_status": net::wan_summary(),
             "interfaces": net::interfaces(),
             "routes": net::routes(),
@@ -93,11 +100,40 @@ pub async fn get() -> ApiResult<Json<Value>> {
             "dns": net::dns_servers(),
             "static_leases": static_leases_value(),
             "hosts": custom_hosts_value(),
+            "dhcp_engine": dhcp_status,
         })
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(ok(data))
+}
+
+#[derive(Deserialize)]
+pub struct DhcpEngineReq {
+    engine: String,
+}
+
+pub async fn get_dhcp_engine(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(ok(serde_json::to_value(state.dhcp.status())
+        .map_err(|e| ApiError::internal(e.to_string()))?))
+}
+
+pub async fn set_dhcp_engine(
+    State(state): State<AppState>,
+    Json(req): Json<DhcpEngineReq>,
+) -> ApiResult<Json<Value>> {
+    let eng = match req.engine.trim().to_ascii_lowercase().as_str() {
+        "routerd" => dhcp::DhcpEngine::Routerd,
+        "dnsmasq" => dhcp::DhcpEngine::Dnsmasq,
+        _ => return Err(ApiError::bad("DHCP 引擎仅支持 routerd 或 dnsmasq")),
+    };
+    let status = state
+        .dhcp
+        .set_engine(eng)
+        .await
+        .map_err(|e| ApiError::internal(format!("{e:#}")))?;
+    Ok(ok(serde_json::to_value(status)
+        .map_err(|e| ApiError::internal(e.to_string()))?))
 }
 
 fn valid_ip(value: &str) -> bool {
@@ -201,6 +237,8 @@ pub async fn update_wan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
             return Err(ApiError::bad("MTU 无效"));
         }
         changes.push(("wan".into(), "mtu".into(), Some(mtu.into())));
+    } else {
+        changes.push(("wan".into(), "mtu".into(), None));
     }
 
     let changes2 = changes.clone();
@@ -240,7 +278,10 @@ fn parse_ip_and_optional_mask(ip_input: &str, mask_input: &str) -> Option<(Strin
     }
 }
 
-pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+pub async fn update_lan(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
     let raw_ip = body
         .get("ipaddr")
         .and_then(|v| v.as_str())
@@ -282,6 +323,7 @@ pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         ("lan".to_string(), "ipaddr".into(), Some(ipaddr.clone())),
         ("lan".to_string(), "netmask".into(), Some(netmask)),
     ];
+    let effective_dnsmasq_ignore = ignore || dhcp::read_configured_engine() == dhcp::DhcpEngine::Routerd;
     let dhcp_changes = vec![
         ("lan".to_string(), "start".into(), Some(start.to_string())),
         ("lan".to_string(), "limit".into(), Some(limit.to_string())),
@@ -289,23 +331,31 @@ pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
         (
             "lan".to_string(),
             "ignore".into(),
-            Some(if ignore { "1" } else { "0" }.into()),
+            Some(if effective_dnsmasq_ignore { "1" } else { "0" }.into()),
         ),
     ];
 
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         uci::apply("network", &net_changes)?;
         uci::apply("dhcp", &dhcp_changes)?;
+        dhcp::write_user_disabled(ignore)?;
         Ok(())
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
 
     // Remove persisted self-signed cert so next boot/restart generates one with the new LAN IP SAN
-    let _ = std::fs::remove_file("/etc/routerd/cert.pem");
-    let _ = std::fs::remove_file("/etc/routerd/key.pem");
+    let _ = std::fs::remove_file(format!("{}/cert.pem", state.data_dir));
+    let _ = std::fs::remove_file(format!("{}/key.pem", state.data_dir));
 
     schedule_reload(&["network", "dnsmasq"]);
+    {
+        let dhcp_mgr = state.dhcp.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let _ = dhcp_mgr.reload().await;
+        });
+    }
     Ok(ok(json!({
         "applied": true,
         "ipaddr": ipaddr,
@@ -313,13 +363,14 @@ pub async fn update_lan(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
     })))
 }
 
-pub async fn reload() -> ApiResult<Json<Value>> {
+pub async fn reload(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(|| {
         let _ = uci::reload_service("network");
         let _ = uci::reload_service("dnsmasq");
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
+    let _ = state.dhcp.reload().await;
     Ok(ok(json!({"reloaded": true})))
 }
 
@@ -400,7 +451,10 @@ pub async fn get_mode() -> ApiResult<Json<Value>> {
     Ok(ok(json!({ "mode": mode })))
 }
 
-pub async fn set_mode(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
+pub async fn set_mode(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
     let mode = body
         .get("mode")
         .and_then(|v| v.as_str())
@@ -412,8 +466,20 @@ pub async fn set_mode(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
 
     let mode_owned = mode.to_string();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let net_cfg = uci::load("network").unwrap_or_default();
+        let wan_dev = net_cfg
+            .section("wan")
+            .and_then(|s| s.get("device"))
+            .unwrap_or("eth1")
+            .to_string();
+        let lan_only_port = if wan_dev == "eth0" { "eth1" } else { "eth0" };
+        let br_sec = net_cfg
+            .by_kind("device")
+            .find(|s| s.get("name") == Some("br-lan"))
+            .map(|s| s.name.clone());
+
         if mode_owned == "ap" {
-            // AP mode: WAN disabled, LAN gets DHCP from upstream main router, local DHCP server disabled
+            // AP mode: WAN disabled, LAN gets DHCP from upstream main router, local DHCP server disabled, both ports bridged
             uci::apply(
                 "network",
                 &[
@@ -424,12 +490,16 @@ pub async fn set_mode(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
                     ("lan".into(), "netmask".into(), None),
                 ],
             )?;
+            if let Some(sec) = br_sec {
+                uci::set_list("network", &sec, "ports", &["eth0", "eth1"])?;
+            }
             uci::apply(
                 "dhcp",
                 &[("lan".into(), "ignore".into(), Some("1".into()))],
             )?;
+            dhcp::write_user_disabled(true)?;
         } else {
-            // Router mode: WAN DHCP, LAN static 192.168.1.1, local DHCP enabled
+            // Router mode: WAN DHCP, LAN static 192.168.1.1, local DHCP enabled, br-lan only keeps LAN port
             uci::apply(
                 "network",
                 &[
@@ -440,17 +510,36 @@ pub async fn set_mode(Json(body): Json<Value>) -> ApiResult<Json<Value>> {
                     ("lan".into(), "netmask".into(), Some("255.255.255.0".into())),
                 ],
             )?;
+            if let Some(sec) = br_sec {
+                uci::set_list("network", &sec, "ports", &[lan_only_port])?;
+            }
+            let dnsmasq_ignore = if dhcp::read_configured_engine() == dhcp::DhcpEngine::Routerd {
+                "1"
+            } else {
+                "0"
+            };
             uci::apply(
                 "dhcp",
-                &[("lan".into(), "ignore".into(), Some("0".into()))],
+                &[("lan".into(), "ignore".into(), Some(dnsmasq_ignore.into()))],
             )?;
+            dhcp::write_user_disabled(false)?;
         }
         Ok(())
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
 
+    let _ = std::fs::remove_file(format!("{}/cert.pem", state.data_dir));
+    let _ = std::fs::remove_file(format!("{}/key.pem", state.data_dir));
+
     schedule_reload(&["network", "dnsmasq", "firewall"]);
+    {
+        let dhcp_mgr = state.dhcp.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let _ = dhcp_mgr.reload().await;
+        });
+    }
     Ok(ok(json!({ "applied": true, "mode": mode })))
 }
 
@@ -474,13 +563,8 @@ pub async fn swap_ports(State(state): State<AppState>) -> ApiResult<Json<Value>>
         uci::set_opt("network", "wan", "device", next_wan)?;
         if let Some(br) = cfg.by_kind("device").find(|s| s.get("name") == Some("br-lan")) {
             let sec = br.name.clone();
-            let _ = uci::delete(&format!("network.{sec}.ports"));
-            util::run(
-                uci::bin(),
-                &["add_list", &format!("network.{sec}.ports={next_lan_port}")],
-            )?;
+            uci::set_list("network", &sec, "ports", &[next_lan_port])?;
         }
-        uci::commit("network")?;
         Ok(next_wan.to_string())
     })
     .await
@@ -586,7 +670,10 @@ fn validate_static_lease(req: &StaticLeaseReq) -> ApiResult<(String, String, Str
     Ok((name, mac, ip))
 }
 
-pub async fn add_static_lease(Json(req): Json<StaticLeaseReq>) -> ApiResult<Json<Value>> {
+pub async fn add_static_lease(
+    State(state): State<AppState>,
+    Json(req): Json<StaticLeaseReq>,
+) -> ApiResult<Json<Value>> {
     let (name, mac, ip) = validate_static_lease(&req)?;
     let section = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let sec = uci::add("dhcp", "host")?;
@@ -604,14 +691,16 @@ pub async fn add_static_lease(Json(req): Json<StaticLeaseReq>) -> ApiResult<Json
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
     schedule_reload(&["dnsmasq"]);
+    let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "section": section })))
 }
 
 pub async fn update_static_lease(
+    State(state): State<AppState>,
     Path(section): Path<String>,
     Json(req): Json<StaticLeaseReq>,
 ) -> ApiResult<Json<Value>> {
-    if !util::valid_name(&section) {
+    if !util::valid_uci_section(&section) {
         return Err(ApiError::bad("无效的条目 ID"));
     }
     let (name, mac, ip) = validate_static_lease(&req)?;
@@ -633,11 +722,15 @@ pub async fn update_static_lease(
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
     schedule_reload(&["dnsmasq"]);
+    let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "updated": true })))
 }
 
-pub async fn delete_static_lease(Path(section): Path<String>) -> ApiResult<Json<Value>> {
-    if !util::valid_name(&section) {
+pub async fn delete_static_lease(
+    State(state): State<AppState>,
+    Path(section): Path<String>,
+) -> ApiResult<Json<Value>> {
+    if !util::valid_uci_section(&section) {
         return Err(ApiError::bad("无效的条目 ID"));
     }
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -647,6 +740,7 @@ pub async fn delete_static_lease(Path(section): Path<String>) -> ApiResult<Json<
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
     schedule_reload(&["dnsmasq"]);
+    let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "deleted": true })))
 }
 
@@ -691,7 +785,7 @@ pub async fn update_custom_host(
     Path(section): Path<String>,
     Json(req): Json<CustomHostReq>,
 ) -> ApiResult<Json<Value>> {
-    if !util::valid_name(&section) {
+    if !util::valid_uci_section(&section) {
         return Err(ApiError::bad("无效的条目 ID"));
     }
     let (name, ip) = validate_custom_host(&req)?;
@@ -715,7 +809,7 @@ pub async fn update_custom_host(
 }
 
 pub async fn delete_custom_host(Path(section): Path<String>) -> ApiResult<Json<Value>> {
-    if !util::valid_name(&section) {
+    if !util::valid_uci_section(&section) {
         return Err(ApiError::bad("无效的条目 ID"));
     }
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

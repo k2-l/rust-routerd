@@ -11,7 +11,7 @@
   - **入站与透明劫持**：支持 Mixed 单端口协议探测（HTTP CONNECT / 明文 HTTP / SOCKS5）与 TProxy TCP/UDP 透明代理（`IP_TRANSPARENT`、`IP_RECVORIGDSTADDR` UDP NAT 会话表与空闲回收），全出站统一绑定 `SO_MARK`（默认 `0x100`）防回环，自动注入 `fw4` `nftables` `prerouting mangle` 规则与 `ip rule` / `ip route local` 策略路由；
   - **多协议出站**：支持 `Direct` / `Block`、Shadowsocks AEAD 与 2022（`aes-128/256-gcm`、`chacha20-ietf-poly1305`、`2022-blake3-*` TCP/UDP）、Trojan（SHA-224 认证 + TLS TCP/UDP-over-TCP）与 VLESS（v0 帧编码、XTLS-Vision `xtls-rprx-vision` 流控、OpenSSL 3.5 TLS 与 Reality X25519 伪装握手）；
   - **内存分流、嗅探与终端联动**：支持 IPv4/IPv6 CIDR、O(1) 域名精确/后缀/关键词、端口、传输协议与 `routerd` 终端表 MAC 策略联动分流；支持 TProxy 首包 TLS SNI / HTTP Host 嗅探；
-  - **内置 DNS 分流与防泄漏**：区分直连与代理 DNS 上游，支持可选 FakeIP（`198.18.0.0/15`）及 ImmortalWrt `dnsmasq-full` 上游自动联动；
+  - **内置 DNS 分流与防泄漏**：区分直连与代理 DNS 上游，支持可选 FakeIP（`198.18.0.0/15`）及 ImmortalWrt `dnsmasq` 上游自动联动；
   - **热重载与 Web 控制面板**：配置预校验后通过 `watch` 信号无缝切换实例并优雅排空旧连接；提供 `/api/singbox*` 管理接口与 Web 控制台「代理核心」页面（状态监控、节点管理与测速、分流规则、DNS/FakeIP 与单设备 MAC 策略）。
 - **上网设置与硬件端口调度**：
   - 支持 **路由模式 (NAT)** 与 **有线中继模式 (AP)** 一键切换；
@@ -20,15 +20,15 @@
   - 内置安全隔离的 **网络连通性诊断工具**（`ping`、`traceroute`、`nslookup`）；
   - 固件默认纯 IPv4 精简架构，移除 `odhcp6c` / `odhcpd-ipv6only` 并清理默认 IPv6 配置。
 - **无线配置（Wi-Fi 6）**：支持 2.4GHz / 5GHz 独立射频开关、信道（含频段合规校验）、频宽（HT/VHT/HE）、发射功率、SSID、WPA2/WPA3 加密与隐藏网络配置，保存后防抖热重载驱动。
-- **终端管理与单设备 QoS 限速**：融合 `iwinfo` 关联终端、DHCP 租约与可达 ARP 表；支持为单个设备设置自定义别名备注与独立的下载/上传速率上限（`fw4` `forward` 链 `nftables` 限速规则）。
+- **终端管理与单设备 QoS 限速**：融合原生 `nl80211` 关联终端、DHCP 租约与可达 ARP 表；支持为单个设备设置自定义别名备注与独立的下载/上传速率上限（`fw4` `forward` 链 `nftables` 限速规则）。
 - **零信任设备准入与 AI Agent API**：
-  - 支持开启「新设备默认禁止上网」白名单拦截（`fw4` `nftables` 集合 + `conntrack` 瞬时踢除未授权连接 + 封堵未授权终端探测本地 SSH）；
-  - 提供面向外部 AI Agent 的 REST API（`/api/agent/v1/*` 与 `/api/agent/v1/openapi.json`），支持按设备维度签发一次性展示的 `rd_*` Bearer Token（支持 `devices:read` / `devices:write` 细粒度权限与操作审计日志）。
+  - 支持开启「新设备默认禁止上网」白名单拦截（`fw4` `nftables` 集合 + 原生 `ctnetlink` 瞬时踢除未授权连接 + 封堵未授权终端探测本地 SSH）；
+  - 提供面向外部 AI Agent 的 REST API（`/api/agent/v1/*` 与 `/api/agent/v1/openapi.json`），支持按维度签发一次性展示的 `rd_*` Bearer Token（支持 `devices:read` / `devices:write` / `system:exec` 细粒度权限隔离、默认关闭的受控 Shell 调试执行接口 `POST /api/agent/v1/system/exec` 及全量操作审计日志）。
 - **端口转发与系统固件运维**：支持防火墙区域查看与 DNAT 端口转发规则增删改查；支持系统配置归档导出（`.tar.gz`）、校验恢复、恢复出厂设置、实时内核日志检索及 `sysupgrade` 固件校验刷写。
 
 ## 性能与工程设计
 
-- **零额外进程解析**：直接解析 `/etc/config/*` 配置文件，避免每次读取配置 fork `uci show`；使用 `statvfs(2)` 系统调用获取存储空间，替代 `df`。
+- **零额外进程解析**：直接解析 `/etc/config/*` 配置文件，避免每次读取配置 fork `uci show`；使用 `statvfs(2)` 系统调用获取存储空间，替代 `df`；通过原生 Linux Netlink (`nl80211` / `ctnetlink` / `rtnetlink`) 与直连 `/var/run/ubus/ubus.sock` 替代 `rpcd`/`iwinfo`/`conntrack`/`ip`/`ubus` CLI 进程调用。
 - **静态硬件元数据缓存**：启动时一次性缓存型号、架构、内核与 MAC 信息，实时遥测仅采样动态指标。
 - **静态资源零开销**：内嵌前端资源自动计算 SHA-256 `ETag`（支持 `304 Not Modified`）并启用 Gzip 压缩。
 - **资源边界控制**：单连接并发信号量上限 256，HTTP/1 头部读取超时 15s，TLS 握手超时 10s，会话上限 64 且自动过期清理。
@@ -53,7 +53,7 @@ routerd/
 │   ├── singbox/           # 内置 Rust 代理核心（入站/出站/路由/嗅探/DNS/TProxy/热重载）
 │   │   ├── config.rs      # SingboxConfig / DnsConfig / FakeIpConfig 配置校验与持久化
 │   │   ├── crypto.rs      # OpenSSL 3.5 AEAD/AES-ECB/HKDF 与 HChaCha20/BLAKE3 密钥派生
-│   │   ├── dns.rs         # 内置 DNS 分流、FakeIP 池与 dnsmasq-full 联动
+│   │   ├── dns.rs         # 内置 DNS 分流、FakeIP 池与 dnsmasq 联动
 │   │   ├── router.rs      # 内存路由引擎（CIDR/域名/端口/协议/MAC）
 │   │   ├── runtime.rs     # 实例生命周期管理、配置热重载与旧连接优雅排空
 │   │   ├── sniff.rs       # TLS SNI / HTTP Host 首包协议嗅探
@@ -98,11 +98,11 @@ routerd/
 # 2. 使用 ImmortalWrt 25.12 ImageBuilder 打包 sysupgrade 固件
 ./scripts/build-image.sh
 
-# 3. 校验固件体积（< 25 MiB，实测 25.12.2 约 15.64 MiB）、rootfs 结构与 apk 依赖清单
+# 3. 校验固件体积（< 25 MiB，实测 25.12.2 约 14.03 MiB）、rootfs 结构与 apk 依赖清单
 ./scripts/verify-image.sh
 ```
 
-镜像打包脚本默认移除 `luci-light`、`uhttpd*`、`default-settings-chn`、`odhcp6c` 与 `odhcpd-ipv6only`，并预装 `libopenssl3`、`ip-tiny`、`rpcd`、`rpcd-mod-iwinfo` 与 `conntrack`。
+镜像打包脚本默认移除 `luci*`、`uhttpd*`、`rpcd*`、`conntrack`、`ip-tiny`、`autocore`、`kmod-nf-nathelper`、`bridger`、`urngd`、`default-settings-chn`、`odhcp6c` 与 `odhcpd-ipv6only`，将 `dnsmasq-full` / `wpad-openssl` 精简替换为 `dnsmasq` / `wpad-basic-openssl`，并预装 `libopenssl3`、`kmod-nf-conntrack-netlink` 与 `kmod-nft-tproxy`。
 
 ## 刷机与首次登录
 
