@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键完成：单元测试 -> 编译 routerd Release -> 打包 ImmortalWrt 25.12.2 固件 -> 校验 -> 提交推送 -> 发布 GitHub Release
+# Manta OS (routerd) 一键完成：单元测试 -> 编译 routerd Release -> 打包 ImmortalWrt 25.12.2 固件 -> 校验 -> 提交推送 -> 发布 GitHub Release
 # 用法:
 #   ./scripts/release.sh <tag> [options]
 # 示例:
@@ -166,7 +166,7 @@ git push origin main
 echo
 echo "=== [4/4] 创建 GitHub Release ($TAG) ==="
 if [ -z "$RELEASE_NOTES" ]; then
-	RELEASE_NOTES="### 固件校验信息 (ImmortalWrt 25.12.2 · Cudy TR3000 v1)
+	RELEASE_NOTES="### Manta OS 固件校验信息 (ImmortalWrt 25.12.2 · Cudy TR3000 v1)
 - 文件名：\`$(basename "$BIN_FILE")\`
 - 大小：\`${BIN_SIZE} bytes\` (\`${BIN_MIB} MiB\`)
 - SHA-256：\`${BIN_SHA}\`"
@@ -176,7 +176,7 @@ GH_ARGS=(
 	"$TAG"
 	"$BIN_FILE"
 	"$SHA_FILE"
-	--title "$TAG (ImmortalWrt 25.12.2 Cudy TR3000 v1)"
+	--title "Manta OS $TAG (ImmortalWrt 25.12.2 · Cudy TR3000 v1)"
 	--notes "$RELEASE_NOTES"
 )
 if [ "$PRERELEASE" = "1" ]; then

@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "routerd Agent API",
+    "title": "Manta OS Agent API",
     "version": "v1",
     "description": "Machine-to-machine API for controlling router device access. Use it to list newly connected devices, approve them for Internet access, revoke or block them, and toggle default-deny enforcement."
   },
@@ -9,7 +9,7 @@
   "security": [{ "bearerAuth": [] }],
   "components": {
     "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Token created in routerd UI, format rd_..." }
+      "bearerAuth": { "type": "http", "scheme": "bearer", "description": "Token created in Manta OS UI, format rd_..." }
     },
     "schemas": {
       "Selector": {

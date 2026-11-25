@@ -1,120 +1,91 @@
-# routerd
+# Manta OS
 
-为 **Cudy TR3000 v1**（MT7981B / aarch64 / musl）定制的高性能路由器管理守护进程，基于 **ImmortalWrt 25.12** 固件体系打造，集成管理控制台与内置 Rust 代理核心。后端采用 Rust（`tokio` / `hyper` / `axum` / `tokio-openssl`）实现并动态链接固件 OpenSSL 3.5，全息拓扑单页前端通过 `rust-embed` 直接内嵌编译进单一二进制文件。
+**Manta OS** 是为 **Cudy TR3000 v1**（MT7981B / `aarch64_cortex-a53`）打造的高性能、极简嵌入式路由器操作系统。基于 **ImmortalWrt 25.12.2**（Linux `6.12.103` / `apk` 包管理体系），彻底移除传统 `LuCI` 与 `uhttpd` 栈，由单一 Rust 守护进程 [`routerd`](file:///Users/k2-l/Downloads/rust-routerd/src/main.rs)（`tokio` + `hyper` + `axum` + `tokio-openssl` + `rust-embed` 内嵌全息单页前端）统一提供 Web 控制台、系统管控、内置 Sing-box 代理核心与 AI Agent API。
 
-## 核心特性
+> **升级兼容说明**：项目对外品牌、Web 控制台、OpenAPI 与固件镜像名已全面更名为 **Manta OS**（`mantaos`），底层单二进制 `/usr/sbin/routerd`、UCI 配置 `/etc/config/routerd`、服务脚本 `/etc/init.d/routerd` 与数据目录 `/etc/routerd` 保持 `routerd` 命名不变，确保现有设备可通过 `sysupgrade` 无缝保留配置升级。
 
-- **双栈协议与安全传输**：原生支持 HTTP/1.1 + HTTP/2 + HTTPS（TLS 1.2/1.3，系统 OpenSSL 3.5），HTTP 80 端口自动 `308 Permanent Redirect` 跳转至 HTTPS 443；首次启动自动生成包含常用内网管理 IP SAN 的 P-256 自签名证书并持久化至 `/etc/routerd/`。
-- **鉴权与安全加固**：直接校验 `/etc/shadow`（`crypt(3)`，支持 `$1$/$5$/$6$`），Cookie + Header 双重 CSRF 防护、IP 级登录失败滑动限速、TLS 握手 10 秒超时熔断与 `RwLock` 抗中毒保护。
-- **实时遥测与全息总览（SSE）**：通过 `GET /api/events`（`text/event-stream`）每 2 秒主动推送 CPU、内存、上下行实时吞吐、待授权设备数及 `singbox` 代理实时速率/连接数；展示 WAN → 路由核心 → 终端拓扑、物理网口速率指示灯与 PPE 硬件加速状态。
-- **内置 Sing-box 代理核心（`src/singbox/`）**：
-  - **入站与透明劫持**：支持 Mixed 单端口协议探测（HTTP CONNECT / 明文 HTTP / SOCKS5）与 TProxy TCP/UDP 透明代理（`IP_TRANSPARENT`、`IP_RECVORIGDSTADDR` UDP NAT 会话表与空闲回收），全出站统一绑定 `SO_MARK`（默认 `0x100`）防回环，自动注入 `fw4` `nftables` `prerouting mangle` 规则与 `ip rule` / `ip route local` 策略路由；
-  - **多协议出站**：支持 `Direct` / `Block`、Shadowsocks AEAD 与 2022（`aes-128/256-gcm`、`chacha20-ietf-poly1305`、`2022-blake3-*` TCP/UDP）、Trojan（SHA-224 认证 + TLS TCP/UDP-over-TCP）与 VLESS（v0 帧编码、XTLS-Vision `xtls-rprx-vision` 流控、OpenSSL 3.5 TLS 与 Reality X25519 伪装握手）；
-  - **内存分流、嗅探与终端联动**：支持 IPv4/IPv6 CIDR、O(1) 域名精确/后缀/关键词、端口、传输协议与 `routerd` 终端表 MAC 策略联动分流；支持 TProxy 首包 TLS SNI / HTTP Host 嗅探；
-  - **内置 DNS 分流与防泄漏**：区分直连与代理 DNS 上游，支持可选 FakeIP（`198.18.0.0/15`）及 ImmortalWrt `dnsmasq` 上游自动联动；
-  - **热重载与 Web 控制面板**：配置预校验后通过 `watch` 信号无缝切换实例并优雅排空旧连接；提供 `/api/singbox*` 管理接口与 Web 控制台「代理核心」页面（状态监控、节点管理与测速、分流规则、DNS/FakeIP 与单设备 MAC 策略）。
-- **上网设置与硬件端口调度**：
-  - 支持 **路由模式 (NAT)** 与 **有线中继模式 (AP)** 一键切换；
-  - 支持 **2.5G (`eth1`) / 1G (`eth0`) 物理网口角色一键互换**；
-  - 支持 WAN（DHCP / 静态 IP / PPPoE 拨号、一键重拨与 `pppd`/`netifd` 拨号日志）、LAN + DHCP 地址池配置（修改 LAN IP 自动清理旧证书以便重新签发匹配 SAN）；
-  - 内置安全隔离的 **网络连通性诊断工具**（`ping`、`traceroute`、`nslookup`）；
-  - 固件默认纯 IPv4 精简架构，移除 `odhcp6c` / `odhcpd-ipv6only` 并清理默认 IPv6 配置。
-- **无线配置（Wi-Fi 6）**：支持 2.4GHz / 5GHz 独立射频开关、信道（含频段合规校验）、频宽（HT/VHT/HE）、发射功率、SSID、WPA2/WPA3 加密与隐藏网络配置，保存后防抖热重载驱动。
-- **终端管理与单设备 QoS 限速**：融合原生 `nl80211` 关联终端、DHCP 租约与可达 ARP 表；支持为单个设备设置自定义别名备注与独立的下载/上传速率上限（`fw4` `forward` 链 `nftables` 限速规则）。
-- **零信任设备准入与 AI Agent API**：
-  - 支持开启「新设备默认禁止上网」白名单拦截（`fw4` `nftables` 集合 + 原生 `ctnetlink` 瞬时踢除未授权连接 + 封堵未授权终端探测本地 SSH）；
-  - 提供面向外部 AI Agent 的 REST API（`/api/agent/v1/*` 与 `/api/agent/v1/openapi.json`），支持按维度签发一次性展示的 `rd_*` Bearer Token（支持 `devices:read` / `devices:write` / `system:exec` 细粒度权限隔离、默认关闭的受控 Shell 调试执行接口 `POST /api/agent/v1/system/exec` 及全量操作审计日志）。
-- **端口转发与系统固件运维**：支持防火墙区域查看与 DNAT 端口转发规则增删改查；支持系统配置归档导出（`.tar.gz`）、校验恢复、恢复出厂设置、实时内核日志检索及 `sysupgrade` 固件校验刷写。
+---
 
-## 性能与工程设计
+## 核心规格概览
 
-- **零额外进程解析**：直接解析 `/etc/config/*` 配置文件，避免每次读取配置 fork `uci show`；使用 `statvfs(2)` 系统调用获取存储空间，替代 `df`；通过原生 Linux Netlink (`nl80211` / `ctnetlink` / `rtnetlink`) 与直连 `/var/run/ubus/ubus.sock` 替代 `rpcd`/`iwinfo`/`conntrack`/`ip`/`ubus` CLI 进程调用。
-- **静态硬件元数据缓存**：启动时一次性缓存型号、架构、内核与 MAC 信息，实时遥测仅采样动态指标。
-- **静态资源零开销**：内嵌前端资源自动计算 SHA-256 `ETag`（支持 `304 Not Modified`）并启用 Gzip 压缩。
-- **资源边界控制**：单连接并发信号量上限 256，HTTP/1 头部读取超时 15s，TLS 握手超时 10s，会话上限 64 且自动过期清理。
+| 维度 | 规格 / 实测指标 |
+| :--- | :--- |
+| **目标硬件** | Cudy TR3000 v1（`cudy,tr3000-v1`，MT7981B，128MB Flash，2.5G + 1G 双网口，Wi-Fi 6） |
+| **基础系统** | ImmortalWrt 25.12.2（Kernel `6.12.103`，`apk` 包管理，纯 IPv4 精简架构） |
+| **核心二进制** | 单二进制 `/usr/sbin/routerd`（约 `3.5 MiB`，动态链接固件 `OpenSSL 3.5`） |
+| **固件体积** | `sysupgrade.bin` 约 **`14.05 MiB`**（严格控制在 `25 MiB` 预算以内） |
+| **常驻内存** | 核心守护进程私有内存 `RssAnon` 约 `2.5 MiB`（消除 `rpcd`/`uhttpd`/`sysntpd`/`urngd` 等冗余常驻进程） |
+| **加密底座** | 系统 `libopenssl3`（`OpenSSL 3.5`）+ `wpad-basic-openssl` + `kmod-crypto-hw-safexcel` |
 
-## 目录结构
+---
 
-```text
-routerd/
-├── Cargo.toml
-├── src/
-│   ├── main.rs            # HTTP/HTTPS 监听、TLS 接入、后台采样与优雅退出
-│   ├── state.rs           # 全局共享状态（会话、采样历史、设备准入表、Agent 令牌、SingboxManager）
-│   ├── auth.rs            # /etc/shadow 密码校验、crypt(3) 哈希与会话管理
-│   ├── tls.rs             # P-256 自签名证书生成与 OpenSSL SslAcceptor 配置
-│   ├── assets.rs          # rust-embed 内嵌静态资源、ETag 与 CSP 安全头
-│   ├── error.rs           # 统一 REST API 错误码与响应映射
-│   ├── util.rs            # 原子写文件、UCI 解析与无 Shell 进程调用封装
-│   ├── access/            # 设备准入状态机、QoS 限速规则与 fw4/nftables 同步
-│   │   ├── devices.rs
-│   │   ├── nft.rs
-│   │   └── agents.rs
-│   ├── singbox/           # 内置 Rust 代理核心（入站/出站/路由/嗅探/DNS/TProxy/热重载）
-│   │   ├── config.rs      # SingboxConfig / DnsConfig / FakeIpConfig 配置校验与持久化
-│   │   ├── crypto.rs      # OpenSSL 3.5 AEAD/AES-ECB/HKDF 与 HChaCha20/BLAKE3 密钥派生
-│   │   ├── dns.rs         # 内置 DNS 分流、FakeIP 池与 dnsmasq 联动
-│   │   ├── router.rs      # 内存路由引擎（CIDR/域名/端口/协议/MAC）
-│   │   ├── runtime.rs     # 实例生命周期管理、配置热重载与旧连接优雅排空
-│   │   ├── sniff.rs       # TLS SNI / HTTP Host 首包协议嗅探
-│   │   ├── tproxy.rs      # SO_MARK/IP_TRANSPARENT 封装、fw4 规则与策略路由同步
-│   │   ├── inbound/       # Mixed (HTTP CONNECT + SOCKS5) 与 TProxy TCP/UDP 入站
-│   │   └── outbound/      # Direct/Block、Shadowsocks(2022)、Trojan、VLESS(TLS/Vision/Reality)
-│   ├── api/               # REST API 路由与处理器
-│   │   ├── mod.rs         # 路由注册、会话/CSRF/演示模式策略中间件
-│   │   ├── auth.rs        # 登录、登出、会话查询与改密
-│   │   ├── system.rs      # 系统状态、历史曲线、SSE 遥测、备份恢复、出厂重置与日志
-│   │   ├── network.rs     # WAN/LAN、路由/AP 模式、网口互换、PPPoE 日志与网络诊断
-│   │   ├── wireless.rs    # 无线射频/SSID 配置与在线终端列表
-│   │   ├── access.rs      # Web 端准入控制、单设备 QoS 限速与 Agent Token 管理
-│   │   ├── agent.rs       # 面向 AI Agent 的 /api/agent/v1/* 接口与 OpenAPI 规范
-│   │   ├── singbox.rs     # 代理配置读写、启停/重启、单节点/批量测速与终端策略
-│   │   ├── firewall.rs    # 防火墙区域与端口转发规则
-│   │   └── firmware.rs    # sysupgrade 固件上传校验与刷写
-│   └── openwrt/           # OpenWrt 底层系统适配层（uci/ubus/sys/net/wireless/firewall）
-├── assets/ui/             # 内嵌单页前端（index.html / app.css / app.js）
-├── packaging/files/       # 注入固件根文件系统的配置与初始化脚本
-└── scripts/
-    ├── build.sh           # 交叉编译动态链接 OpenSSL 3.5 的 aarch64-unknown-linux-musl 二进制
-    ├── build-image.sh     # 调用 ImmortalWrt 25.12 ImageBuilder 生成 sysupgrade 镜像
-    ├── verify-image.sh    # 校验固件体积预算（< 25 MiB）、动态库依赖与 25.12 apk 软件包清单
-    └── run-sim.sh         # 基于 QEMU user-mode 的只读演示沙盒启动脚本
-```
+## 核心功能特性
 
-## 构建与镜像打包
+### 1. 极简单二进制与原生系统接管
+- **零 `fork+exec` 热路径**：使用纯 Rust 原生系统接口替代高频 CLI 子进程调用，大幅降低 CPU 与内存开销：
+  - **原生 Netlink**：基于 `libc` 实现 `NETLINK_GENERIC`（[`nl80211`](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/nl80211.rs) 无线接口/底噪/终端统计）、`NETLINK_NETFILTER`（[`ctnetlink`](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/conntrack.rs) 精确五元组流表清理）与 `NETLINK_ROUTE`（[`rtnetlink`](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/rtnetlink.rs) 路由/策略规则/邻居表操作）。
+  - **原生 `ubus` 客户端**（[ubus.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/ubus.rs)）：直连 `/var/run/ubus/ubus.sock`，实现完整 Big-Endian `ubus_msghdr` 与 `blobmsg` 编解码及连接复用。
+  - **原生 UCI 原子读写**（[uci.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/uci.rs)）：支持命名/匿名段（`@kind[idx]`）、`list` 保序与 `flock` + 原子写回。
+  - **内置 SNTP 校时**（[ntp.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/ntp.rs)）：RFC 4330 SNTP v4 客户端替代 `sysntpd`，支持后台周期校时与手动一键同步。
+  - **纯 Rust RFC 2131 DHCPv4 服务（与 `dnsmasq` 并存兜底）**（[dhcp.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/dhcp.rs)）：支持 `DISCOVER`/`OFFER`/`REQUEST`/`ACK`/`NAK`/`RELEASE`/`DECLINE`/`INFORM`、静态 MAC→IP 优先绑定与共享 `/tmp/dhcp.leases`（零丢租约切换）；默认 `dnsmasq` 兜底，Web UI 可一键切换至 Rust 内置引擎，若绑定失败、异常退出或服务关闭则自动回退 `dnsmasq` 接管。
 
-### 环境依赖
+### 2. 内置 Rust 代理核心（Sing-box 兼容）
+- **入站与透明劫持**（[src/singbox/](file:///Users/k2-l/Downloads/rust-routerd/src/singbox)）：支持 Mixed（HTTP CONNECT / 明文 HTTP / SOCKS5）与 TProxy TCP/UDP 透明代理（`IP_TRANSPARENT`、`IP_RECVORIGDSTADDR` UDP NAT 会话表与空闲回收），全出站统一 `SO_MARK` 防回环；开启 TProxy 时自动协调关闭 `flow_offloading` 避免已建立连接绕过透明代理。
+- **多协议出站**：支持 `Direct` / `Block`、Shadowsocks（AEAD 与 2022 `2022-blake3-*`）、Trojan（TLS TCP / UDP-over-TCP）、VLESS（v0、XTLS-Vision、OpenSSL TLS 与 Reality X25519）、VMess、WebSocket、SOCKS5 与 HTTP。
+- **内存分流与防泄漏 DNS**：内置 5 组预设分流规则与在线编辑/排序，支持 IPv4/IPv6 CIDR、域名精确/后缀/关键词、端口、协议与终端 MAC 策略联动；支持 TLS SNI / HTTP Host 首包嗅探与可选 FakeIP（`198.18.0.0/15`）；支持节点测速与热重载优雅排空旧连接。
 
-- Rust 工具链（stable）及 `aarch64-unknown-linux-musl` target；
-- `aarch64-linux-musl` 交叉编译工具链（默认 `/opt/musl/bin/aarch64-linux-musl-gcc`）；
-- **ImmortalWrt 25.12 ImageBuilder**（默认路径 `/root/cudy/dl/ib`，可通过 `IB=/path/to/ib` 覆盖）。**注意：本项目已全面切换至 ImmortalWrt 25.12（`apk` 包管理体系），不再向下兼容 24.10.x 及更早版本。**
+### 3. 上网设置、无线配置与防火墙
+- **工作模式与网口调度**：支持 **路由模式 (NAT)** 与 **有线中继模式 (AP)** 一键切换（自动调整 `br-lan` 桥接端口与 DHCP 状态）；支持 **2.5G / 1G 物理网口角色互换**。
+- **WAN / LAN 管理**：支持 WAN DHCP / 静态 IP / PPPoE 拨号（带一键重拨与拨号日志）、LAN IP/子网与 DHCP 地址池配置、DHCP 静态租约与自定义局域网 Hosts。
+- **Wi-Fi 6 双频控制**：支持 2.4GHz / 5GHz 独立射频开关、信道合规校验、HT/VHT/HE 频宽、发射功率、WPA2/WPA3-SAE 与隐藏网络配置。
+- **防火墙与网络诊断**：支持可视化查看防火墙区域、管理 **通信规则 (Traffic Rules)** 与 **DNAT 端口转发**；内置受控 `ping` / `traceroute` / `nslookup` 诊断工具。
 
-### 编译与生成固件
+### 4. 终端管控、零信任准入与单设备 QoS
+- 融合 `nl80211` 关联终端、`/tmp/dhcp.leases` 与过滤掉 WAN 网关的 LAN ARP 表。
+- 支持「自由接入」与「新设备默认禁止上网」白名单准入模式，配备待放行设备队列、黑名单拉黑与基于 `ctnetlink` 的瞬时踢人下线。
+- 支持为单个终端配置自定义备注与独立上下行 QoS 限速（`fw4` `nftables`）。
 
-```bash
-# 1. 编译动态链接 OpenSSL 3.5 的 aarch64 二进制并安装至 packaging/files/usr/sbin/routerd
-./scripts/build.sh
+### 5. 实时遥测与内存/性能调优
+- **SSE 实时遥测**（`GET /api/events`）：每 2 秒推送 CPU、精确内存（区分可回收文件缓存与不可回收匿名/内核开销）、上下行速率与代理核心状态。
+- **内存透视与进程排行**：直读 `/proc/meminfo` 与 `/proc/[pid]/status` 展示 Slab、驱动 DMA（如 `mt7915e` WED）与用户态进程占用排行。
+- **系统调优**：支持在线调整 `mt7915e` WED 硬件加速开关、`vm.min_free_kbytes` 水位线与 `dnsmasq` 缓存大小。
+- **备份与升级**：支持导出 `manta-os-backup.tar.gz` 配置归档、GZIP 校验恢复、恢复出厂设置、内核日志检索与 `sysupgrade` 固件校验刷写。
 
-# 2. 使用 ImmortalWrt 25.12 ImageBuilder 打包 sysupgrade 固件
-./scripts/build-image.sh
+### 6. 全模块 AI Agent REST API（`/api/agent/v1/*`）
+- 内置完整 [OpenAPI 3.1 规范](file:///Users/k2-l/Downloads/rust-routerd/src/api/openapi.json) 与 `/api/agent/v1/capabilities` 能力自描述接口，覆盖 `system`、`logs`、`network`、`wireless`、`clients`、`firewall`、`singbox`、`devices`、`audit` 等全路由器模块读写。
+- **精细权限域隔离**：签发一次性明文展示的 `rd_*` Bearer Token，严格隔离 `devices:read`、`devices:write` 与高危调试域 `system:exec`（默认不勾选）。
+- **受控调试执行**（`POST /api/agent/v1/system/exec`）：独立 `setsid()` 进程组与超时 `SIGKILL` 整组清理、双路 128 KiB 截断防死锁、并发上限保护及全量操作审计日志。
 
-# 3. 校验固件体积（< 25 MiB，实测 25.12.2 约 14.03 MiB）、rootfs 结构与 apk 依赖清单
-./scripts/verify-image.sh
-```
+---
 
-镜像打包脚本默认移除 `luci*`、`uhttpd*`、`rpcd*`、`conntrack`、`ip-tiny`、`autocore`、`kmod-nf-nathelper`、`bridger`、`urngd`、`default-settings-chn`、`odhcp6c` 与 `odhcpd-ipv6only`，将 `dnsmasq-full` / `wpad-openssl` 精简替换为 `dnsmasq` / `wpad-basic-openssl`，并预装 `libopenssl3`、`kmod-nf-conntrack-netlink` 与 `kmod-nft-tproxy`。
+## 系统精简与原生替代对比
 
-## 刷机与首次登录
+| 传统 OpenWrt 组件 | Manta OS 处理方式 | 收益说明 |
+| :--- | :--- | :--- |
+| `luci*` / `uhttpd*` | **彻底移除**，由 `routerd` 内嵌前端替代 | 消除解释器与多进程 Web 栈 |
+| `rpcd` / `rpcd-mod-iwinfo` / `iwinfo` | **彻底移除**，改为原生 `nl80211` + `ubus` Socket | 消除常驻进程与 CLI 开销 |
+| `conntrack` / `ip-tiny` | **彻底移除**，改为原生 `ctnetlink` + `rtnetlink` | 消除热路径 `fork+exec` |
+| `sysntpd` / `urngd` | **彻底移除**，改为内置 SNTP v4 与内核 6.12 CRNG | 减少用户态常驻进程 |
+| `dnsmasq-full` / `wpad-openssl` | **无损精简**为 `dnsmasq` + `wpad-basic-openssl` | 保留完整 WPA2/WPA3 与 DNS/DHCP 兜底 |
+| `autocore` / `bridger` / `kmod-nf-nathelper` | **彻底移除** | 清理冗余内核 eBPF/TC 依赖，节省 Flash |
+| `odhcp6c` / `odhcpd-ipv6only` | **彻底移除** | 纯 IPv4 极简定位 |
+| `libopenssl3` / USB 存储栈 / `dropbear` | **完整保留** | 保障 TLS 硬件加速、SSH 与外接存储兼容 |
 
-1. 在设备现有后台或 U-Boot Web 恢复界面刷入生成的 `immortalwrt-25.12.*-cudy_tr3000-v1-squashfs-sysupgrade.bin`。
-2. 启动完成后访问 `https://192.168.1.1`（首次访问自签证书需在浏览器确认安全例外）。
-3. 默认管理员账号为 `root`，初始密码为 `admin`。首次登录将强制要求修改管理员密码。
+---
 
-默认密码仅在 `/etc/shadow` 中不存在可用 `root` 密码时由 `/etc/uci-defaults/99-routerd` 写入；保留配置升级不会覆盖已设置的管理员密码。
+## 快速开始：刷机与首次登录
 
-## 运行时配置
+1. **刷入固件**：在设备现有后台或 U-Boot Web 恢复界面刷入 `immortalwrt-25.12.2-mantaos-mediatek-filogic-cudy_tr3000-v1-squashfs-sysupgrade.bin`（支持从旧版本 `routerd` 固件保留配置直接升级）。
+2. **访问控制台**：启动完成后访问 `https://192.168.1.1` 或 `https://mantaos.local`（首次启动默认主机名为 `MantaOS`；自签名证书需在浏览器中确认信任）。
+3. **初始凭据**：默认管理员账号为 `root`，初始密码为 `admin`，首次登录将强制要求修改密码。
 
-配置文件位于 `/etc/config/routerd`：
+> 初始密码仅在 `/etc/shadow` 中尚未配置可用 `root` 密码时由 [99-routerd](file:///Users/k2-l/Downloads/rust-routerd/packaging/files/etc/uci-defaults/99-routerd) 写入；保留配置升级不会覆盖已有密码和自定义主机名。
+
+---
+
+## 运行时配置与运维
+
+主配置文件位于 [`/etc/config/routerd`](file:///Users/k2-l/Downloads/rust-routerd/packaging/files/etc/config/routerd)：
 
 ```uci
 config routerd 'main'
@@ -123,16 +94,91 @@ config routerd 'main'
 	option https '0.0.0.0:443'
 	option tls '1'
 	option data_dir '/etc/routerd'
+	option dhcp_engine 'dnsmasq'
+	option dhcp_disabled '0'
 ```
 
-服务由 `procd` 托管，支持常用运维命令：
+服务由 `procd` 托管：
 
 ```sh
 /etc/init.d/routerd {start|stop|restart|reload|enable|disable}
 ```
 
-## 安全说明
+### AI Agent API 调用示例
 
-- 管理端口默认仅对 `lan` 区域开放，`wan` 侧入站流量由 `firewall4` 默认拒绝。
-- 如需替换为自有 TLS 证书，可将证书与私钥写入 `/etc/routerd/cert.pem` 和 `/etc/routerd/key.pem`（权限 `0600`），随后执行 `/etc/init.d/routerd restart`。
-- 固件升级接口会校验文件头 `sysupgrade-` 魔数及体积上限，刷写前请务必确认固件型号与当前硬件匹配。
+在控制台「安全管控 -> AI Agent 访问令牌」中签发令牌后（`rd_...`），可通过 Bearer Token 访问全模块接口：
+
+```sh
+# 查询服务能力与支持权限域
+curl -k --noproxy '*' https://192.168.1.1/api/agent/v1/capabilities
+
+# 获取系统状态与内存明细（需 devices:read 权限）
+curl -k --noproxy '*' -H "Authorization: Bearer <your_token>" \
+  https://192.168.1.1/api/agent/v1/system
+```
+
+---
+
+## 从源码构建与发布
+
+### 环境依赖
+- Rust 工具链（`aarch64-unknown-linux-musl` target）与交叉编译环境（容器镜像 `localhost/routerd-dev:immortalwrt-25.12-arm64`）
+- **ImmortalWrt 25.12 ImageBuilder**（仅支持 ImmortalWrt 25.12 `apk` 体系）
+
+### 容器内测试与编译
+
+```sh
+podman run --rm --platform linux/arm64 --cap-add=NET_ADMIN \
+  -v "$PWD:/src:rw" -v routerd-cargo:/root/.cargo/registry:rw -v routerd-target:/src/target:rw \
+  -w /src localhost/routerd-dev:immortalwrt-25.12-arm64 sh -c '
+    set -e
+    export RUSTFLAGS="-C target-feature=-crt-static -C link-arg=-Wl,--rpath=/usr/lib -C link-arg=-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1"
+    cargo test --offline --target aarch64-unknown-linux-musl
+    touch src/assets.rs
+    cargo build --release --offline --target aarch64-unknown-linux-musl
+    cp target/aarch64-unknown-linux-musl/release/routerd packaging/files/usr/sbin/routerd
+  '
+```
+
+### 固件打包、校验与发布
+
+```sh
+# 仅本地打包并校验固件（检查 < 25 MiB 体积、apk 包清单、OpenSSL 动态链接等）
+./scripts/build-image.sh && ./scripts/verify-image.sh
+
+# 一键测试 + 编译 + 打包 + 校验（--no-push 仅本地构建，移除则自动提交并创建 GitHub Release）
+./scripts/release.sh v1.0.2-beta --no-push
+```
+
+---
+
+## 目录结构
+
+```text
+rust-routerd/
+├── Cargo.toml
+├── src/
+│   ├── main.rs            # HTTP/HTTPS 监听、TLS 接入、SNTP/DHCP/Singbox 生命周期管理
+│   ├── state.rs           # 全局共享状态（会话、采样历史、准入表、Agent 令牌、DhcpManager、SingboxManager）
+│   ├── auth.rs            # /etc/shadow crypt(3) 校验与会话/CSRF 管理
+│   ├── tls.rs             # P-256 自签名证书生成（SAN 含 mantaos.local）与 OpenSSL 配置
+│   ├── assets.rs          # rust-embed 内嵌前端资源、ETag 与安全响应头
+│   ├── error.rs           # 统一 REST API 错误码映射
+│   ├── util.rs            # 原子写文件、UCI 段名校验与进程封装
+│   ├── access/            # 零信任设备准入、QoS 限速、fw4/nftables 同步与 Agent Token/审计
+│   ├── singbox/           # 内置 Rust 代理核心（Mixed/TProxy、多协议出站、路由、嗅探、DNS/FakeIP）
+│   ├── api/               # Web 控制台与 AI Agent REST API（/api/*、/api/agent/v1/*、openapi.json）
+│   └── openwrt/           # 原生 OpenWrt 适配层（dhcp/ntp/uci/ubus/netlink/nl80211/conntrack/rtnetlink/sys/net/wireless/firewall）
+├── assets/ui/             # Manta OS 内嵌全息单页控制台（index.html / app.css / app.js）
+├── packaging/files/       # 注入固件根文件系统的配置、init.d 服务与 99-routerd 初始化脚本
+└── scripts/               # 交叉编译、ImageBuilder 打包、镜像校验与一键发布脚本
+```
+
+---
+
+## 安全说明与开源协议
+
+- 管理端口默认仅面向 `lan` 区域开放，`wan` 侧入站流量由 `firewall4` 默认拒绝。
+- 如需替换为自有 TLS 证书，可将 PEM 证书与私钥写入 `/etc/routerd/cert.pem` 和 `/etc/routerd/key.pem`（权限 `0600`），并执行 `/etc/init.d/routerd restart`。
+- `system:exec` 属于高危调试权限域，建议仅在远程排障时临时签发，使用完毕后立即在控制台吊销。
+- 本项目基于 **MIT License** 开源。

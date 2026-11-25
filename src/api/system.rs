@@ -125,7 +125,7 @@ pub async fn backup(State(state): State<AppState>) -> ApiResult<Response> {
     );
     h.insert(
         header::CONTENT_DISPOSITION,
-        "attachment; filename=\"routerd-backup.tar.gz\"".parse().unwrap(),
+        "attachment; filename=\"manta-os-backup.tar.gz\"".parse().unwrap(),
     );
     Ok(resp)
 }

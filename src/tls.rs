@@ -23,7 +23,7 @@ fn generate(data_dir: &str, hostname: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let pkey = PKey::from_ec_key(ec_key).context("wrap EC PKey")?;
 
     let mut name_builder = X509NameBuilder::new()?;
-    name_builder.append_entry_by_text("O", "routerd")?;
+    name_builder.append_entry_by_text("O", "Manta OS")?;
     name_builder.append_entry_by_text("CN", hostname)?;
     let name = name_builder.build();
 
@@ -48,7 +48,7 @@ fn generate(data_dir: &str, hostname: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     builder.append_extension(ExtendedKeyUsage::new().server_auth().build()?)?;
 
     let mut san = SubjectAlternativeName::new();
-    for dns in [hostname, "routerd.local", "localhost"] {
+    for dns in [hostname, "mantaos.local", "routerd.local", "localhost"] {
         if !dns.is_empty() {
             san.dns(dns);
         }

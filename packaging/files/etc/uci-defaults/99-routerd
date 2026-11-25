@@ -49,6 +49,13 @@ if [ -x /etc/init.d/urngd ]; then
 	/etc/init.d/urngd disable 2>/dev/null
 fi
 
+# Default hostname MantaOS on fresh boot (preserve custom hostname on upgrade)
+CUR_HOST="$(uci -q get system.@system[0].hostname || true)"
+if [ -z "$CUR_HOST" ] || [ "$CUR_HOST" = "ImmortalWrt" ] || [ "$CUR_HOST" = "OpenWrt" ]; then
+	uci -q set system.@system[0].hostname='MantaOS'
+	uci commit system
+fi
+
 # Make sure routerd is enabled for this boot and future boots.
 [ -x /etc/init.d/routerd ] && /etc/init.d/routerd enable 2>/dev/null
 

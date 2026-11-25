@@ -154,7 +154,7 @@ function showLogin() {
   $('#app').classList.add('hidden');
   $('#login-view').classList.remove('hidden');
   $('#login-device').textContent = state.meta.model ? `${state.meta.model} · ${state.meta.hostname || ''}` : 'Cudy TR3000 // MT7981';
-  $('#login-version').textContent = `routerd ${state.meta.version || ''}`.trim();
+  $('#login-version').textContent = `Manta OS ${state.meta.version || ''}`.trim();
   $('#login-tls').textContent = state.meta.tls ? 'TLS 1.3 加密通道' : 'HTTP 明文通道';
 }
 
@@ -216,7 +216,7 @@ function enterApp() {
   $('#app').classList.remove('hidden');
   const host = state.meta.hostname || 'router';
   $('#side-host').textContent = host; $('#top-host').textContent = host;
-  $('#side-ver').textContent = `routerd ${state.meta.version || ''}`.trim();
+  $('#side-ver').textContent = `Manta OS ${state.meta.version || ''}`.trim();
 
   $$('#nav .nav-item').forEach((btn) => {
     const v = btn.dataset.view;
@@ -730,8 +730,8 @@ async function renderNetwork() {
     const cur = (d.dhcp_engine && d.dhcp_engine.configured_engine) || 'dnsmasq';
     if (engine === cur) return;
     const msg = engine === 'routerd'
-      ? '将由 routerd 内置 Rust DHCP 接管 UDP :67，dnsmasq 仅保留 DNS 与自动兜底（共享 /tmp/dhcp.leases 零丢租约）。确定切换？'
-      : '将切回 dnsmasq DHCP 服务，routerd 释放 UDP :67 端口。确定切换？';
+      ? '将由 Manta OS 内置 Rust DHCP 接管 UDP :67，dnsmasq 仅保留 DNS 与自动兜底（共享 /tmp/dhcp.leases 零丢租约）。确定切换？'
+      : '将切回 dnsmasq DHCP 服务，Manta OS 释放 UDP :67 端口。确定切换？';
     if (!await confirmDialog('切换 DHCP 引擎', msg, '确认切换')) return;
     try {
       await api('/api/network/dhcp/engine', { method: 'PUT', body: { engine } });
@@ -1524,7 +1524,7 @@ async function renderSingbox() {
 
     <div class="card mt-14">
       <div class="row-between">
-        <div><h2 style="margin:0;font-size:15px">终端 MAC 分流策略</h2><p class="muted tiny" style="margin:4px 0 0">联动 routerd 终端表，为指定设备单独指定直连 / 代理 / 拦截出站</p></div>
+        <div><h2 style="margin:0;font-size:15px">终端 MAC 分流策略</h2><p class="muted tiny" style="margin:4px 0 0">联动 Manta OS 终端表，为指定设备单独指定直连 / 代理 / 拦截出站</p></div>
       </div>
       <div class="table-wrap mt-14"><table>
         <thead><tr><th>终端名称</th><th>IP</th><th>MAC 地址</th><th class="right">出站策略</th></tr></thead>
@@ -2007,7 +2007,7 @@ async function renderSystem() {
         <div class="muted tiny">导出当前网络、无线与黑白名单配置归档，或恢复到出厂默认状态。</div>
         <div class="card-actions">
           <input type="file" id="cfg-restore-file" accept=".gz,.tar.gz" class="hidden">
-          <a class="btn" href="/api/system/backup" download="routerd-backup.tar.gz">${icon('save')}导出配置备份</a>
+          <a class="btn" href="/api/system/backup" download="manta-os-backup.tar.gz">${icon('save')}导出配置备份</a>
           <button class="btn" id="cfg-restore-btn">${icon('upload')}恢复配置</button>
           <button class="btn btn-danger" id="sys-factory-reset">${icon('power')}恢复出厂设置</button>
         </div>

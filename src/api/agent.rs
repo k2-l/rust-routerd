@@ -47,7 +47,7 @@ fn agent_error(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response();
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
-        HeaderValue::from_static("Bearer realm=\"routerd\""),
+        HeaderValue::from_static("Bearer realm=\"Manta OS\""),
     );
     resp
 }
@@ -473,7 +473,7 @@ pub async fn openapi() -> impl IntoResponse {
 
 pub async fn capabilities(State(state): State<AppState>) -> Json<Value> {
     ok(json!({
-        "name": "routerd",
+        "name": "Manta OS",
         "api": "v1",
         "nft_available": nft::available(),
         "sim": state.sim,

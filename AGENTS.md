@@ -1,6 +1,7 @@
-# routerd 开发指南与最新进度 (AGENTS.md)
+# Manta OS (routerd) 开发指南与最新进度 (AGENTS.md)
 
 ## 1. 项目概览
+- **项目名称**：**Manta OS**（对外品牌、Web UI、OpenAPI 与固件包名为 `Manta OS` / `mantaos`；底层单二进制与 UCI/initd 服务保留 `routerd`，以无缝兼容现有设备保留配置升级）
 - **目标设备**：Cudy TR3000 v1（`cudy,tr3000-v1`、`aarch64_cortex-a53`、`128MB` 闪存、纯 IPv4 定位）
 - **基础系统**：ImmortalWrt 25.12.2（`apk` 包管理，内核 `6.12.103`），**已彻底移除 `luci` 与 `uhttpd`**，由单二进制 `routerd`（Rust + Axum + `rust-embed` 内嵌前端 + 自研 Sing-box 代理核心）统一提供 Web UI 与管控能力。
 - **固件体积预算**：`sysupgrade.bin` 严格控制在 `25 MiB` 以内（当前约 `14.03 MiB`）。
@@ -97,7 +98,12 @@ podman run --rm --platform linux/arm64 --cap-add=NET_ADMIN \
    - **`dnsmasq` 并存与自动兜底**（`src/state.rs`、`src/main.rs`、`src/api/network.rs`、`src/api/mod.rs`）：默认保持 `dhcp_engine='dnsmasq'`，`dnsmasq` 始终运行负责 DNS (`:53`) 与兜底；切换至 `routerd` 前先设 `dhcp.lan.ignore='1'` 并 reload `dnsmasq` 让出 `:67`；若绑定失败、运行异常退出或 `routerd` 优雅关闭，自动恢复 `dhcp.lan.ignore='0'` 并 reload `dnsmasq`；双方共用 `/tmp/dhcp.leases`（5 列格式）实现零丢租约切换；通过 `routerd.main.dhcp_disabled` 隔离用户关闭 DHCP 意图；新增 `GET/PUT /api/network/dhcp/engine` 及 `/api/agent/v1/network/dhcp/engine`。
    - **前端控制区**（`assets/ui/app.js`）：网络页 LAN/DHCP 卡片新增引擎状态徽章、`dnsmasq (兜底)` / `Rust 内置` 一键切换按钮及实时地址池/租约/报文计数器。
 
-- **最新已验证状态**：`cargo test --offline --target aarch64-unknown-linux-musl` **76 passed; 0 failed**；`packaging/files/usr/sbin/routerd` 已编译更新（`3.5M`，SHA-256 `42c6dc22f5ef56bc931159c834a2860d9c42ceb610d99fede2808c2637626204`）；`./scripts/build-image.sh && ./scripts/verify-image.sh` 已验证通过并导出至 `.release/latest/`（`14.05 MiB` / `14735640 bytes`，已安装 `162` 个 apk 包，SHA-256 `c39e5cf7aae55f4cab5b0f47f5fa3c5e4f3ed2a0927e0799f85a21fd5cca01c3`，`RESULT: PASS`）。
+13. **品牌更名为 Manta OS（保留底层 `routerd` 兼容升级）**
+   - **Web UI 与 OpenAPI**（`assets/ui/index.html`、`assets/ui/app.js`、`src/api/agent.rs`、`src/api/openapi.json`）：页面标题、启动画面、登录页、侧边栏品牌更名为 `Manta OS`，Agent `/capabilities` 与 OpenAPI 文档同步更名。
+   - **证书、备份与默认主机名**（`src/tls.rs`、`src/api/mod.rs`、`src/api/system.rs`、`packaging/files/etc/uci-defaults/99-routerd`）：自签名证书 `O = Manta OS` 并新增 `mantaos.local` SAN（保留 `routerd.local` 兼容），HTTP→HTTPS 跳转默认域名改为 `mantaos.local`，配置备份文件名改为 `manta-os-backup.tar.gz`，首次启动将未自定义主机名设为 `MantaOS`。
+   - **固件与发布脚本**（`scripts/build-image.sh`、`scripts/release.sh`、`README.md`）：`EXTRA_IMAGE_NAME="mantaos"`，底层 `/usr/sbin/routerd`、`/etc/config/routerd`、`/etc/init.d/routerd`、`/etc/routerd` 与 `routerd_sid` 保持不变以确保无缝保留配置升级。
+
+- **最新已验证状态**：`cargo test --offline --target aarch64-unknown-linux-musl` **76 passed; 0 failed**；`packaging/files/usr/sbin/routerd` 已编译更新（`3.5M`，SHA-256 `6dd7790505ea86fcf8b4fd279c3f2d430d55815f958922e421084d4ef423fc1b`）；`./scripts/build-image.sh && ./scripts/verify-image.sh` 已验证通过并导出至 `.release/latest/`（`immortalwrt-25.12.2-mantaos-mediatek-filogic-cudy_tr3000-v1-squashfs-sysupgrade.bin`，`14.05 MiB` / `14735640 bytes`，已安装 `162` 个 apk 包，SHA-256 `c00266493b78caeae6c532084731c851cb86513d8fe4390e17d13f0eacd7489e`，`RESULT: PASS`）。
 
 ---
 

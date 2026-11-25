@@ -150,12 +150,13 @@ EOF
 fi
 
 mkdir -p "$OUT"
+rm -f "$OUT"/*-routerd-*
 cd "$IB"
 make image \
   PROFILE="$PROFILE" \
   PACKAGES="$REMOVE $ADD" \
   FILES="$ROOT/packaging/files" \
-  EXTRA_IMAGE_NAME="routerd" \
+  EXTRA_IMAGE_NAME="mantaos" \
   BIN_DIR="$OUT" \
   -j"$JOBS"
 

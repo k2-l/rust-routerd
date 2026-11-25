@@ -342,7 +342,7 @@ pub fn redirect_router() -> Router {
             .headers()
             .get(header::HOST)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("routerd.local");
+            .unwrap_or("mantaos.local");
         let host = host.split(':').next().unwrap_or(host);
         let path = req
             .uri()
