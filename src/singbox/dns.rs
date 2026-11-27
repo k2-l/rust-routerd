@@ -387,14 +387,18 @@ pub fn sync_dnsmasq(cfg: &DnsConfig, singbox_enabled: bool, sim: bool) -> Result
         let upstream = format!("127.0.0.1#{}", listen.port());
         uci::set_opt("dhcp", "@dnsmasq[0]", "noresolv", "1")?;
         uci::set_list("dhcp", "@dnsmasq[0]", "server", &[&upstream])?;
-        let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
+        if crate::openwrt::dhcp::dnsmasq_installed() {
+            let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
+        }
     } else {
         let uci_cfg = uci::load("dhcp").unwrap_or_default();
         if let Some(sec) = uci_cfg.sections.iter().find(|s| s.kind == "dnsmasq") {
             if sec.get("noresolv") == Some("1") {
                 let _ = uci::set_opt("dhcp", "@dnsmasq[0]", "noresolv", "0");
                 let _ = uci::delete("dhcp.@dnsmasq[0].server");
-                let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
+                if crate::openwrt::dhcp::dnsmasq_installed() {
+                    let _ = util::run_ok("/etc/init.d/dnsmasq", &["reload"]);
+                }
             }
         }
     }

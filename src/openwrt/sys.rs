@@ -363,7 +363,9 @@ pub fn set_tuning(
             anyhow::bail!("dnsmasq cachesize 必须在 150..=10000 之间");
         }
         crate::openwrt::uci::set_opt("dhcp", "@dnsmasq[0]", "cachesize", &cs.to_string())?;
-        crate::openwrt::uci::reload_service("dnsmasq")?;
+        if crate::openwrt::dhcp::dnsmasq_installed() {
+            crate::openwrt::uci::reload_service("dnsmasq")?;
+        }
     }
 
     Ok(get_tuning())

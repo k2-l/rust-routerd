@@ -89,6 +89,7 @@ fn custom_hosts_value() -> Vec<Value> {
 pub async fn get(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let dhcp_status = state.dhcp.status();
     let dhcp_status_for_lan = dhcp_status.clone();
+    let dns_status = state.dns_srv.status();
     let data = tokio::task::spawn_blocking(move || {
         json!({
             "wan": wan_value(),
@@ -101,11 +102,17 @@ pub async fn get(State(state): State<AppState>) -> ApiResult<Json<Value>> {
             "static_leases": static_leases_value(),
             "hosts": custom_hosts_value(),
             "dhcp_engine": dhcp_status,
+            "dns_status": dns_status,
         })
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
     Ok(ok(data))
+}
+
+pub async fn get_dns_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(ok(serde_json::to_value(state.dns_srv.status())
+        .map_err(|e| ApiError::internal(e.to_string()))?))
 }
 
 #[derive(Deserialize)]
@@ -157,6 +164,9 @@ fn schedule_reload(services: &[&'static str]) {
         tokio::time::sleep(Duration::from_millis(900)).await;
         let _ = tokio::task::spawn_blocking(move || {
             for s in services {
+                if s == "dnsmasq" && !dhcp::dnsmasq_installed() {
+                    continue;
+                }
                 let _ = uci::reload_service(s);
             }
         })
@@ -349,6 +359,7 @@ pub async fn update_lan(
     let _ = std::fs::remove_file(format!("{}/key.pem", state.data_dir));
 
     schedule_reload(&["network", "dnsmasq"]);
+    state.dns_srv.reload();
     {
         let dhcp_mgr = state.dhcp.clone();
         tokio::spawn(async move {
@@ -366,10 +377,13 @@ pub async fn update_lan(
 pub async fn reload(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     tokio::task::spawn_blocking(|| {
         let _ = uci::reload_service("network");
-        let _ = uci::reload_service("dnsmasq");
+        if dhcp::dnsmasq_installed() {
+            let _ = uci::reload_service("dnsmasq");
+        }
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
+    state.dns_srv.reload();
     let _ = state.dhcp.reload().await;
     Ok(ok(json!({"reloaded": true})))
 }
@@ -533,6 +547,7 @@ pub async fn set_mode(
     let _ = std::fs::remove_file(format!("{}/key.pem", state.data_dir));
 
     schedule_reload(&["network", "dnsmasq", "firewall"]);
+    state.dns_srv.reload();
     {
         let dhcp_mgr = state.dhcp.clone();
         tokio::spawn(async move {
@@ -690,7 +705,10 @@ pub async fn add_static_lease(
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
     let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "section": section })))
 }
@@ -721,7 +739,10 @@ pub async fn update_static_lease(
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
     let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "updated": true })))
 }
@@ -739,7 +760,10 @@ pub async fn delete_static_lease(
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
     let _ = state.dhcp.reload().await;
     Ok(ok(json!({ "deleted": true })))
 }
@@ -762,7 +786,10 @@ fn validate_custom_host(req: &CustomHostReq) -> ApiResult<(String, String)> {
     Ok((name, ip))
 }
 
-pub async fn add_custom_host(Json(req): Json<CustomHostReq>) -> ApiResult<Json<Value>> {
+pub async fn add_custom_host(
+    State(state): State<AppState>,
+    Json(req): Json<CustomHostReq>,
+) -> ApiResult<Json<Value>> {
     let (name, ip) = validate_custom_host(&req)?;
     let section = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let sec = uci::add("dhcp", "domain")?;
@@ -777,11 +804,16 @@ pub async fn add_custom_host(Json(req): Json<CustomHostReq>) -> ApiResult<Json<V
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
+    state.dns_srv.flush_cache();
     Ok(ok(json!({ "section": section })))
 }
 
 pub async fn update_custom_host(
+    State(state): State<AppState>,
     Path(section): Path<String>,
     Json(req): Json<CustomHostReq>,
 ) -> ApiResult<Json<Value>> {
@@ -804,11 +836,18 @@ pub async fn update_custom_host(
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
+    state.dns_srv.flush_cache();
     Ok(ok(json!({ "updated": true })))
 }
 
-pub async fn delete_custom_host(Path(section): Path<String>) -> ApiResult<Json<Value>> {
+pub async fn delete_custom_host(
+    State(state): State<AppState>,
+    Path(section): Path<String>,
+) -> ApiResult<Json<Value>> {
     if !util::valid_uci_section(&section) {
         return Err(ApiError::bad("无效的条目 ID"));
     }
@@ -818,7 +857,11 @@ pub async fn delete_custom_host(Path(section): Path<String>) -> ApiResult<Json<V
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))??;
-    schedule_reload(&["dnsmasq"]);
+    if dhcp::dnsmasq_installed() {
+        schedule_reload(&["dnsmasq"]);
+    }
+    state.dns_srv.reload();
+    state.dns_srv.flush_cache();
     Ok(ok(json!({ "deleted": true })))
 }
 

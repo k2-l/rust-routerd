@@ -210,6 +210,12 @@ async fn main() {
             dhcp.bootstrap().await;
         });
     }
+    {
+        let dns_srv = state.dns_srv.clone();
+        tokio::spawn(async move {
+            dns_srv.start().await;
+        });
+    }
     openwrt::sys::spawn_sampler(state.history.clone());
     openwrt::ntp::spawn_ntp(state.ntp.clone(), state.sim);
     {
@@ -334,6 +340,7 @@ async fn main() {
     }
 
     tracing::info!("shutting down");
+    state.dns_srv.stop().await;
     state.dhcp.shutdown().await;
     state.singbox.stop().await;
     let _ = tx.send(true);

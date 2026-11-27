@@ -11,6 +11,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::access::devices::DeviceStore;
+use crate::openwrt::dns::DnsServerManager;
 use crate::singbox::config::{InboundConfig, SingboxConfig};
 use crate::singbox::dns::{self, DnsContext, FakeIpPool};
 use crate::singbox::inbound;
@@ -187,6 +188,7 @@ pub struct SingboxManager {
     data_dir: String,
     sim: bool,
     access: Option<Arc<RwLock<DeviceStore>>>,
+    dns_srv: Option<Arc<DnsServerManager>>,
 }
 
 impl SingboxManager {
@@ -201,6 +203,11 @@ impl SingboxManager {
         access: Arc<RwLock<DeviceStore>>,
     ) -> Self {
         Self::load_inner(data_dir, sim, Some(access))
+    }
+
+    pub fn with_dns_srv(mut self, dns_srv: Arc<DnsServerManager>) -> Self {
+        self.dns_srv = Some(dns_srv);
+        self
     }
 
     fn load_inner(
@@ -218,6 +225,7 @@ impl SingboxManager {
             data_dir: data_dir.to_string(),
             sim,
             access,
+            dns_srv: None,
         }
     }
 
@@ -320,6 +328,10 @@ impl SingboxManager {
                 let _ = dns::sync_dnsmasq(&cfg_clone.dns, cfg_clone.enabled, sim);
             })
             .await;
+            if let Some(dns_srv) = &self.dns_srv {
+                dns_srv.reload();
+                dns_srv.flush_cache();
+            }
             *self.last_error.write().unwrap_or_else(|e| e.into_inner()) = None;
             return Ok(());
         };
@@ -378,6 +390,10 @@ impl SingboxManager {
 
         if let Err(e) = dns_res {
             tracing::warn!("singbox dnsmasq sync failed: {e:#}");
+        }
+        if let Some(dns_srv) = &self.dns_srv {
+            dns_srv.reload();
+            dns_srv.flush_cache();
         }
 
         if let Err(e) = fw4_res {

@@ -560,16 +560,27 @@ async function renderNetwork() {
     </div>
 
     <div class="card mt-20">
-      <div class="card-title"><h2>局域网 (LAN) 与 DHCP 服务</h2><span class="sub">${esc(d.lan.device)}</span></div>
+      <div class="card-title"><h2>局域网 (LAN) 与 DHCP / DNS 服务</h2><span class="sub">${esc(d.lan.device)}</span></div>
       ${(() => {
         const eng = d.dhcp_engine || {};
+        const dns = d.dns_status || {};
         const isRust = eng.active_engine === 'routerd';
+        const dnsmasqAvail = eng.dnsmasq_available !== false;
         const badge = eng.fallback_active
           ? '<span class="badge warn">已自动降级至 dnsmasq 兜底</span>'
           : isRust
-            ? '<span class="badge ok">Rust 内置 DHCP 运行中（dnsmasq 兜底待命）</span>'
+            ? (dnsmasqAvail
+                ? '<span class="badge ok">Rust 内置 DHCP 运行中（dnsmasq 兜底待命）</span>'
+                : '<span class="badge ok">Rust 内置 DHCP 运行中</span>')
             : '<span class="badge">dnsmasq DHCP 运行中</span>';
-        return `<div class="row wrap gap-10" style="justify-content:space-between;align-items:center;padding:10px 12px;margin-bottom:14px;border-radius:10px;background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border,rgba(255,255,255,0.08))">
+        const dnsBadge = dns.running
+          ? '<span class="badge ok">Rust 内置 DNS (:53) 运行中</span>'
+          : '<span class="badge warn">Rust 内置 DNS (:53) 未运行</span>';
+        const sbBadge = dns.singbox_linked
+          ? '<span class="badge ok">已联动 Sing-box (:1053)</span>'
+          : '<span class="badge">直连上游</span>';
+        const upstreamsText = (dns.upstreams && dns.upstreams.length) ? dns.upstreams.join(', ') : '—';
+        return `<div class="row wrap gap-10" style="justify-content:space-between;align-items:center;padding:10px 12px;margin-bottom:10px;border-radius:10px;background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border,rgba(255,255,255,0.08))">
           <div class="row wrap gap-10" style="align-items:center">
             <span class="tiny muted">DHCP 引擎</span>
             ${badge}
@@ -577,8 +588,19 @@ async function renderNetwork() {
           </div>
           <div class="row wrap gap-8" style="align-items:center">
             ${isRust ? `<span class="tiny muted mono">池 ${esc(eng.pool_start)}-${esc(eng.pool_end)} · 租约 ${eng.active_leases || 0} · OFFER ${eng.offers_sent || 0} / ACK ${eng.acks_sent || 0} / NAK ${eng.naks_sent || 0}</span>` : ''}
-            <button type="button" class="btn btn-sm ${eng.configured_engine === 'dnsmasq' ? 'btn-primary' : ''}" id="dhcp-eng-dnsmasq">dnsmasq (兜底)</button>
+            ${dnsmasqAvail ? `<button type="button" class="btn btn-sm ${eng.configured_engine === 'dnsmasq' ? 'btn-primary' : ''}" id="dhcp-eng-dnsmasq">dnsmasq (兜底)</button>` : ''}
             <button type="button" class="btn btn-sm ${eng.configured_engine === 'routerd' ? 'btn-primary' : ''}" id="dhcp-eng-routerd">Rust 内置</button>
+          </div>
+        </div>
+        <div class="row wrap gap-10" style="justify-content:space-between;align-items:center;padding:10px 12px;margin-bottom:14px;border-radius:10px;background:var(--surface-2,rgba(255,255,255,0.03));border:1px solid var(--border,rgba(255,255,255,0.08))">
+          <div class="row wrap gap-10" style="align-items:center">
+            <span class="tiny muted">DNS 服务</span>
+            ${dnsBadge}
+            ${sbBadge}
+            ${dns.last_error ? `<span class="tiny" style="color:var(--warn)">${esc(dns.last_error)}</span>` : ''}
+          </div>
+          <div class="row wrap gap-8" style="align-items:center">
+            <span class="tiny muted mono">上游 ${esc(upstreamsText)} · 缓存 ${dns.cache_entries || 0}/${dns.cache_size_limit || 0} · 查询 ${dns.queries || 0} · 缓存命中 ${dns.cache_hits || 0} · 本地命中 ${dns.local_hits || 0}</span>
           </div>
         </div>`;
       })()}
@@ -727,7 +749,7 @@ async function renderNetwork() {
   };
 
   const switchDhcpEngine = async (engine) => {
-    const cur = (d.dhcp_engine && d.dhcp_engine.configured_engine) || 'dnsmasq';
+    const cur = (d.dhcp_engine && d.dhcp_engine.configured_engine) || 'routerd';
     if (engine === cur) return;
     const msg = engine === 'routerd'
       ? '将由 Manta OS 内置 Rust DHCP 接管 UDP :67，dnsmasq 仅保留 DNS 与自动兜底（共享 /tmp/dhcp.leases 零丢租约）。确定切换？'
@@ -1512,7 +1534,7 @@ async function renderSingbox() {
               <option value="0" ${!(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>关闭 (代理隧道解析)</option>
               <option value="1" ${(cfg.dns && cfg.dns.fakeip && cfg.dns.fakeip.enabled) ? 'selected' : ''}>开启 (198.18.0.0/15)</option>
             </select></label>
-            <label class="field"><span>联动 dnsmasq</span><select name="link_dnsmasq">
+            <label class="field"><span>联动本地 DNS (:53)</span><select name="link_dnsmasq">
               <option value="0" ${!(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>否</option>
               <option value="1" ${(cfg.dns && cfg.dns.link_dnsmasq) ? 'selected' : ''}>是 (自动接管上游)</option>
             </select></label>
@@ -2026,7 +2048,7 @@ async function renderSystem() {
             <label class="field"><span>内核保留水位 (min_free_kbytes)</span><select name="min_free_kbytes">
               ${[4096, 8192, 16384, 32768].map((v) => `<option value="${v}" ${Number(t.min_free_kbytes) === v ? 'selected' : ''}>${v} KB (${Math.round(v / 1024)} MB)</option>`).join('')}
             </select></label>
-            <label class="field"><span>dnsmasq 缓存条数</span><select name="dnsmasq_cachesize">
+            <label class="field"><span>DNS 缓存条数</span><select name="dnsmasq_cachesize">
               ${[500, 1500, 4000, 8000].map((v) => `<option value="${v}" ${Number(t.dnsmasq_cachesize) === v ? 'selected' : ''}>${v} 条</option>`).join('')}
             </select></label>
           </div>

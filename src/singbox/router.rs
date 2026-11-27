@@ -165,6 +165,7 @@ impl Router {
         self.has_src_mac
     }
 
+    #[cfg(test)]
     pub fn match_outbound(&self, ctx: &RouteContext) -> &str {
         self.match_outbound_with_mac(ctx, None)
     }

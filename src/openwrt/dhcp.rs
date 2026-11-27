@@ -51,8 +51,8 @@ const OFFER_HOLD_SECS: u64 = 120;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DhcpEngine {
-    #[default]
     Dnsmasq,
+    #[default]
     Routerd,
 }
 
@@ -65,12 +65,16 @@ impl DhcpEngine {
     }
 
     pub fn from_str_lossy(s: &str) -> Self {
-        if s.trim().eq_ignore_ascii_case("routerd") {
-            Self::Routerd
-        } else {
+        if s.trim().eq_ignore_ascii_case("dnsmasq") {
             Self::Dnsmasq
+        } else {
+            Self::Routerd
         }
     }
+}
+
+pub fn dnsmasq_installed() -> bool {
+    std::path::Path::new("/etc/init.d/dnsmasq").exists()
 }
 
 pub fn read_configured_engine() -> DhcpEngine {
@@ -78,7 +82,7 @@ pub fn read_configured_engine() -> DhcpEngine {
     let val = cfg
         .section("main")
         .and_then(|s| s.get("dhcp_engine"))
-        .unwrap_or("dnsmasq");
+        .unwrap_or("routerd");
     DhcpEngine::from_str_lossy(val)
 }
 
@@ -810,6 +814,7 @@ impl DhcpCore {
 pub struct DhcpStatus {
     pub configured_engine: DhcpEngine,
     pub active_engine: DhcpEngine,
+    pub dnsmasq_available: bool,
     pub fallback_active: bool,
     pub running: bool,
     pub disabled: bool,
@@ -840,6 +845,7 @@ impl DhcpStatus {
         Self {
             configured_engine: configured,
             active_engine: active,
+            dnsmasq_available: dnsmasq_installed(),
             fallback_active,
             running,
             disabled: cfg.user_disabled,
@@ -887,6 +893,9 @@ fn unix_now() -> u64 {
 }
 
 fn set_dnsmasq_dhcp_ignore(ignore: bool) -> Result<()> {
+    if !dnsmasq_installed() {
+        return Ok(());
+    }
     uci::set_opt("dhcp", "lan", "ignore", if ignore { "1" } else { "0" })?;
     let _ = util::run("/etc/init.d/dnsmasq", &["reload"]);
     Ok(())
@@ -1026,6 +1035,9 @@ impl DhcpManager {
 
     pub async fn set_engine(&self, engine: DhcpEngine) -> Result<DhcpStatus> {
         let _guard = self.op_lock.lock().await;
+        if engine == DhcpEngine::Dnsmasq && !self.sim && !dnsmasq_installed() {
+            bail!("系统未安装 dnsmasq，无法切换至 dnsmasq DHCP 引擎");
+        }
         tokio::task::spawn_blocking(move || write_configured_engine(engine))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))??;

@@ -66,12 +66,16 @@ pub async fn update_tuning(
     if state.sim {
         return Err(ApiError::Forbidden("演示模式禁止修改系统调优参数".into()));
     }
+    let cachesize_updated = body.dnsmasq_cachesize.is_some();
     let updated = tokio::task::spawn_blocking(move || {
         sys::set_tuning(body.wed_enabled, body.min_free_kbytes, body.dnsmasq_cachesize)
     })
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::bad(e.to_string()))?;
+    if cachesize_updated {
+        state.dns_srv.reload();
+    }
     Ok(ok(serde_json::to_value(updated).unwrap_or(Value::Null)))
 }
 

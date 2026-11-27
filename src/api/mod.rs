@@ -175,6 +175,7 @@ fn protected_router(state: AppState) -> Router {
             "/api/network/dhcp/engine",
             get(network::get_dhcp_engine).put(network::set_dhcp_engine),
         )
+        .route("/api/network/dns/status", get(network::get_dns_status))
         .route("/api/network/dhcp/hosts", post(network::add_static_lease))
         .route(
             "/api/network/dhcp/hosts/{section}",
@@ -270,6 +271,7 @@ fn agent_router(state: AppState) -> Router {
             "/api/agent/v1/network/dhcp/engine",
             get(network::get_dhcp_engine).put(network::set_dhcp_engine),
         )
+        .route("/api/agent/v1/network/dns/status", get(network::get_dns_status))
         .route("/api/agent/v1/network/dhcp/hosts", post(network::add_static_lease))
         .route(
             "/api/agent/v1/network/dhcp/hosts/{section}",
