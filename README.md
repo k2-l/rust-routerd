@@ -27,7 +27,7 @@
   - **原生 `ubus` 客户端**（[ubus.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/ubus.rs)）：直连 `/var/run/ubus/ubus.sock`，实现完整 Big-Endian `ubus_msghdr` 与 `blobmsg` 编解码及连接复用。
   - **原生 UCI 原子读写**（[uci.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/uci.rs)）：支持命名/匿名段（`@kind[idx]`）、`list` 保序与 `flock` + 原子写回。
   - **内置 SNTP 校时**（[ntp.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/ntp.rs)）：RFC 4330 SNTP v4 客户端替代 `sysntpd`，支持后台周期校时与手动一键同步。
-  - **纯 Rust RFC 2131 DHCPv4 服务（与 `dnsmasq` 并存兜底）**（[dhcp.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/dhcp.rs)）：支持 `DISCOVER`/`OFFER`/`REQUEST`/`ACK`/`NAK`/`RELEASE`/`DECLINE`/`INFORM`、静态 MAC→IP 优先绑定与共享 `/tmp/dhcp.leases`（零丢租约切换）；默认 `dnsmasq` 兜底，Web UI 可一键切换至 Rust 内置引擎，若绑定失败、异常退出或服务关闭则自动回退 `dnsmasq` 接管。
+  - **纯 Rust DNS + RFC 2131 DHCPv4 服务**（[dhcp.rs](file:///Users/k2-l/Downloads/rust-routerd/src/openwrt/dhcp.rs)）：彻底替代 `dnsmasq`，由 `routerd` 原生提供局域网 DNS 转发/Hosts 解析与 `DISCOVER`/`OFFER`/`REQUEST`/`ACK`/`NAK`/`RELEASE`/`DECLINE`/`INFORM` DHCPv4 状态机、静态 MAC→IP 优先绑定及 `/tmp/dhcp.leases` 租约持久化。
 
 ### 2. 内置 Rust 代理核心（Sing-box 兼容）
 - **入站与透明劫持**（[src/singbox/](file:///Users/k2-l/Downloads/rust-routerd/src/singbox)）：支持 Mixed（HTTP CONNECT / 明文 HTTP / SOCKS5）与 TProxy TCP/UDP 透明代理（`IP_TRANSPARENT`、`IP_RECVORIGDSTADDR` UDP NAT 会话表与空闲回收），全出站统一 `SO_MARK` 防回环；开启 TProxy 时自动协调关闭 `flow_offloading` 避免已建立连接绕过透明代理。
@@ -66,7 +66,8 @@
 | `rpcd` / `rpcd-mod-iwinfo` / `iwinfo` | **彻底移除**，改为原生 `nl80211` + `ubus` Socket | 消除常驻进程与 CLI 开销 |
 | `conntrack` / `ip-tiny` | **彻底移除**，改为原生 `ctnetlink` + `rtnetlink` | 消除热路径 `fork+exec` |
 | `sysntpd` / `urngd` / `urandom-seed` / `getrandom` | **彻底移除**，改为内置 SNTP v4 与内核 6.12 CRNG | 减少用户态常驻进程与冗余熵工具 |
-| `dnsmasq-full` / `wpad-openssl` | **无损精简**为 `dnsmasq` + `wpad-basic-openssl` | 保留完整 WPA2/WPA3 与 DNS/DHCP 兜底 |
+| `dnsmasq` / `dnsmasq-full` | **彻底移除**，改为纯 Rust 内置 DNS + DHCPv4 服务 | 消除外部 DNS/DHCP 守护进程与常驻内存开销 |
+| `wpad-openssl` | **无损精简**为 `wpad-basic-openssl` | 保留完整 WPA2/WPA3-SAE 与 802.11r |
 | `autocore` / `bridger` / `kmod-nf-nathelper` | **彻底移除** | 清理冗余内核 eBPF/TC 依赖，节省 Flash |
 | `odhcp6c` / `odhcpd-ipv6only` | **彻底移除** | 纯 IPv4 极简定位 |
 | `libopenssl3` / USB 存储栈 / `dropbear` | **完整保留** | 保障 TLS 硬件加速、SSH 与外接存储兼容 |
@@ -94,7 +95,7 @@ config routerd 'main'
 	option https '0.0.0.0:443'
 	option tls '1'
 	option data_dir '/etc/routerd'
-	option dhcp_engine 'dnsmasq'
+	option dhcp_engine 'routerd'
 	option dhcp_disabled '0'
 ```
 

@@ -52,6 +52,7 @@ check "no conntrack CLI package in apk" "! grep -q '^P:conntrack\$' '$R/lib/apk/
 check "no ip-tiny binary" "[ ! -e '$R/usr/libexec/ip-tiny' ]"
 check "no ip-tiny package in apk" "! grep -q '^P:ip-tiny\$' '$R/lib/apk/db/installed'"
 check "no dnsmasq-full package in apk" "! grep -q '^P:dnsmasq-full\$' '$R/lib/apk/db/installed'"
+check "no dnsmasq package in apk" "! grep -q '^P:dnsmasq\$' '$R/lib/apk/db/installed'"
 check "no libnettle8 / libgmp10 / libnetfilter-conntrack3" "! grep -qE '^P:(libnettle8|libgmp10|libnetfilter-conntrack3|libnfnetlink0)\$' '$R/lib/apk/db/installed'"
 check "no wpad-openssl (full) package in apk" "! grep -q '^P:wpad-openssl\$' '$R/lib/apk/db/installed'"
 check "no autocore package in apk" "! grep -q '^P:autocore\$' '$R/lib/apk/db/installed'"
@@ -70,7 +71,7 @@ check "apk database present" "[ -f '$R/lib/apk/db/installed' ]"
 
 echo
 echo "== required runtime packages (ImmortalWrt 25.12 apk) =="
-for p in apk-openssl libopenssl3 iw wpad-basic-openssl uci ubus netifd dnsmasq firewall4 dropbear ppp ppp-mod-pppoe kmod-nf-conntrack-netlink kmod-nft-tproxy; do
+for p in apk-openssl libopenssl3 iw wpad-basic-openssl uci ubus netifd firewall4 dropbear ppp ppp-mod-pppoe kmod-nf-conntrack-netlink kmod-nft-tproxy; do
 	check "package $p" "grep -q '^P:$p\$' '$R/lib/apk/db/installed'"
 done
 

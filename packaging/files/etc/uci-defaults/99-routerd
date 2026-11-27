@@ -48,6 +48,17 @@ if [ -x /etc/init.d/urngd ]; then
 	/etc/init.d/urngd stop 2>/dev/null
 	/etc/init.d/urngd disable 2>/dev/null
 fi
+if [ -x /etc/init.d/dnsmasq ]; then
+	/etc/init.d/dnsmasq stop 2>/dev/null
+	/etc/init.d/dnsmasq disable 2>/dev/null
+fi
+
+# Migrate preserved-config upgrades away from removed dnsmasq to native routerd DNS+DHCP
+CUR_DHCP_ENGINE="$(uci -q get routerd.main.dhcp_engine || true)"
+if [ ! -x /usr/sbin/dnsmasq ] && { [ -z "$CUR_DHCP_ENGINE" ] || [ "$CUR_DHCP_ENGINE" = "dnsmasq" ]; }; then
+	uci -q set routerd.main.dhcp_engine='routerd'
+	uci commit routerd
+fi
 
 # Default hostname MantaOS on fresh boot (preserve custom hostname on upgrade)
 CUR_HOST="$(uci -q get system.@system[0].hostname || true)"
