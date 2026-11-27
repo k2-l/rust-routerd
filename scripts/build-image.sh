@@ -20,7 +20,7 @@ if ! grep -Eq '25\.12' "$IB/include/version.mk" "$IB/.config" "$IB/repositories"
 	exit 1
 fi
 
-REMOVE="-luci -luci-light -luci-base -luci-app-firewall -luci-app-package-manager -luci-lib-base -luci-lib-apk -luci-lib-uqr -luci-i18n-base-zh-cn -luci-mod-admin-full -luci-mod-network -luci-mod-status -luci-mod-system -luci-proto-ipv6 -luci-proto-ppp -luci-theme-bootstrap -luci-compat -rpcd -rpcd-mod-iwinfo -rpcd-mod-file -rpcd-mod-ucode -rpcd-mod-luci -rpcd-mod-rrdns -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua -odhcp6c -odhcpd-ipv6only -conntrack -ip-tiny -dnsmasq-full -wpad-openssl -autocore -kmod-nf-nathelper -bridger -urngd"
+REMOVE="-luci -luci-light -luci-base -luci-app-firewall -luci-app-package-manager -luci-lib-base -luci-lib-apk -luci-lib-uqr -luci-i18n-base-zh-cn -luci-mod-admin-full -luci-mod-network -luci-mod-status -luci-mod-system -luci-proto-ipv6 -luci-proto-ppp -luci-theme-bootstrap -luci-compat -rpcd -rpcd-mod-iwinfo -rpcd-mod-file -rpcd-mod-ucode -rpcd-mod-luci -rpcd-mod-rrdns -default-settings-chn -uhttpd -uhttpd-mod-ubus -uhttpd-mod-lua -odhcp6c -odhcpd-ipv6only -conntrack -ip-tiny -dnsmasq-full -wpad-openssl -autocore -kmod-nf-nathelper -bridger -urngd -urandom-seed -getrandom"
 ADD="libopenssl3 kmod-nf-conntrack-netlink kmod-nft-tproxy dnsmasq wpad-basic-openssl"
 
 WGET_SHIM_DIR=""

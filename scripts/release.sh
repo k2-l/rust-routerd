@@ -114,7 +114,7 @@ if [ "$SIZE" -gt "$LIMIT" ]; then
 	echo "ERROR: 固件体积 ${SIZE} 超过 25 MiB 限制" >&2
 	exit 2
 fi
-if grep -Eq "^(luci|uhttpd|rpcd|iwinfo |conntrack |ip-tiny |dnsmasq-full |wpad-openssl |autocore |kmod-nf-nathelper |bridger |libnettle8 |libgmp10 |libbpf1 |urngd )" /root/cudy/work/firmware/*.manifest; then
+if grep -Eq "^(luci|uhttpd|rpcd|iwinfo |conntrack |ip-tiny |dnsmasq-full |wpad-openssl |autocore |kmod-nf-nathelper |bridger |libnettle8 |libgmp10 |libbpf1 |urngd |urandom-seed |getrandom )" /root/cudy/work/firmware/*.manifest; then
 	echo "ERROR: 检测到禁用或已替换的冗余软件包残留" >&2
 	exit 3
 fi

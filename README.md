@@ -65,7 +65,7 @@
 | `luci*` / `uhttpd*` | **彻底移除**，由 `routerd` 内嵌前端替代 | 消除解释器与多进程 Web 栈 |
 | `rpcd` / `rpcd-mod-iwinfo` / `iwinfo` | **彻底移除**，改为原生 `nl80211` + `ubus` Socket | 消除常驻进程与 CLI 开销 |
 | `conntrack` / `ip-tiny` | **彻底移除**，改为原生 `ctnetlink` + `rtnetlink` | 消除热路径 `fork+exec` |
-| `sysntpd` / `urngd` | **彻底移除**，改为内置 SNTP v4 与内核 6.12 CRNG | 减少用户态常驻进程 |
+| `sysntpd` / `urngd` / `urandom-seed` / `getrandom` | **彻底移除**，改为内置 SNTP v4 与内核 6.12 CRNG | 减少用户态常驻进程与冗余熵工具 |
 | `dnsmasq-full` / `wpad-openssl` | **无损精简**为 `dnsmasq` + `wpad-basic-openssl` | 保留完整 WPA2/WPA3 与 DNS/DHCP 兜底 |
 | `autocore` / `bridger` / `kmod-nf-nathelper` | **彻底移除** | 清理冗余内核 eBPF/TC 依赖，节省 Flash |
 | `odhcp6c` / `odhcpd-ipv6only` | **彻底移除** | 纯 IPv4 极简定位 |

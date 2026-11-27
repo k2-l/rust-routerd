@@ -58,6 +58,8 @@ check "no autocore package in apk" "! grep -q '^P:autocore\$' '$R/lib/apk/db/ins
 check "no kmod-nf-nathelper package in apk" "! grep -q '^P:kmod-nf-nathelper\$' '$R/lib/apk/db/installed'"
 check "no bridger / eBPF TC stack in apk" "! grep -qE '^P:(bridger|libbpf1|libelf1|kmod-sched-core)\$' '$R/lib/apk/db/installed'"
 check "no urngd package in apk" "! grep -q '^P:urngd\$' '$R/lib/apk/db/installed'"
+check "no urandom-seed package in apk" "! grep -q '^P:urandom-seed\$' '$R/lib/apk/db/installed'"
+check "no getrandom package in apk" "! grep -q '^P:getrandom\$' '$R/lib/apk/db/installed'"
 check "no LuCI packages in apk" "! grep -q '^P:luci' '$R/lib/apk/db/installed'"
 check "no LuCI lua tree" "[ ! -d '$R/usr/lib/lua/luci' ]"
 check "no LuCI www tree" "[ ! -d '$R/www/luci-static' ]"
