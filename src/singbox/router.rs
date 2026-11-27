@@ -97,6 +97,7 @@ struct CompiledRule {
 pub struct Router {
     rules: Vec<CompiledRule>,
     final_outbound: String,
+    has_src_mac: bool,
 }
 
 impl Router {
@@ -152,10 +153,16 @@ impl Router {
                 outbound: r.outbound.clone(),
             });
         }
+        let has_src_mac = rules.iter().any(|r| !r.src_macs.is_empty());
         Ok(Self {
             rules,
             final_outbound: cfg.final_outbound.clone(),
+            has_src_mac,
         })
+    }
+
+    pub fn has_src_mac_rules(&self) -> bool {
+        self.has_src_mac
     }
 
     pub fn match_outbound(&self, ctx: &RouteContext) -> &str {

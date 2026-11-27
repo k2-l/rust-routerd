@@ -154,7 +154,7 @@ async fn run_udp_session(
     core.metrics.active_connections.fetch_add(1, Ordering::Relaxed);
     core.metrics.total_connections.fetch_add(1, Ordering::Relaxed);
 
-    let mut rbuf = vec![0u8; 65535];
+    let mut rbuf = vec![0u8; 16384];
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
     let target = TargetAddr::Ip(dst.ip());
@@ -203,7 +203,7 @@ async fn serve_tproxy_udp(
     tracing::info!("singbox tproxy udp listening on {listen_addr}");
 
     let sessions: UdpSessions = Arc::new(Mutex::new(HashMap::new()));
-    let mut buf = vec![0u8; 65535];
+    let mut buf = vec![0u8; 16384];
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -213,24 +213,23 @@ async fn serve_tproxy_udp(
                 }
                 match sock.try_io(Interest::READABLE, || tproxy::recv_tproxy_udp(&sock, &mut buf)) {
                     Ok((n, src, dst)) => {
-                        let pkt = buf[..n].to_vec();
                         let key = (src, dst);
                         let existing = {
                             sessions.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()
                         };
+                        let mut pending_pkt: Option<Vec<u8>> = None;
                         if let Some(tx) = existing {
-                            match tx.try_send(pkt) {
+                            match tx.try_send(buf[..n].to_vec()) {
                                 Ok(()) => continue,
                                 Err(mpsc::error::TrySendError::Full(_)) => continue,
                                 Err(mpsc::error::TrySendError::Closed(returned)) => {
                                     // Session just expired; fall through to recreate with `returned`.
                                     sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
-                                    let _ = returned;
+                                    pending_pkt = Some(returned);
                                 }
                             }
                         }
 
-                        let pkt = buf[..n].to_vec();
                         let target_addr = core
                             .lookup_fakeip(dst.ip())
                             .map(TargetAddr::Domain)
@@ -252,6 +251,7 @@ async fn serve_tproxy_udp(
                             tracing::warn!("tproxy udp session table full ({MAX_UDP_SESSIONS}), dropping {src} -> {dst}");
                             continue;
                         }
+                        let pkt = pending_pkt.unwrap_or_else(|| buf[..n].to_vec());
                         let (tx, rx) = mpsc::channel(64);
                         let _ = tx.try_send(pkt);
                         map.insert(key, tx);

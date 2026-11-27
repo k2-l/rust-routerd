@@ -109,18 +109,6 @@ pub fn encode_alpn(protos: &[String]) -> Result<Option<Vec<u8>>> {
     Ok(Some(wire))
 }
 
-/// Connect TCP (with SO_MARK) and optionally wrap with OpenSSL TLS.
-pub async fn connect_tls(
-    server: &str,
-    port: u16,
-    tls: &TlsConfig,
-    fwmark: u32,
-) -> Result<BoxStream> {
-    OutboundTlsConnector::new(server, tls)?
-        .connect(server, port, fwmark)
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

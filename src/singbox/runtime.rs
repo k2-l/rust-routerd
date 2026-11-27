@@ -87,6 +87,9 @@ impl RuntimeCore {
     }
 
     pub fn resolve_src_mac(&self, src_ip: Option<IpAddr>) -> Option<String> {
+        if !self.router.has_src_mac_rules() {
+            return None;
+        }
         let ip = src_ip?.to_string();
         let store = self.access.as_ref()?;
         store
@@ -309,8 +312,14 @@ impl SingboxManager {
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = new_cfg.clone();
 
         let Some(core) = prepared_core else {
-            let _ = tproxy::sync_fw4(&new_cfg, &self.data_dir, self.sim);
-            let _ = dns::sync_dnsmasq(&new_cfg.dns, new_cfg.enabled, self.sim);
+            let cfg_clone = new_cfg.clone();
+            let data_dir = self.data_dir.clone();
+            let sim = self.sim;
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = tproxy::sync_fw4(&cfg_clone, &data_dir, sim);
+                let _ = dns::sync_dnsmasq(&cfg_clone.dns, cfg_clone.enabled, sim);
+            })
+            .await;
             *self.last_error.write().unwrap_or_else(|e| e.into_inner()) = None;
             return Ok(());
         };
@@ -356,11 +365,22 @@ impl SingboxManager {
             }));
         }
 
-        if let Err(e) = dns::sync_dnsmasq(&new_cfg.dns, new_cfg.enabled, self.sim) {
+        let cfg_clone = new_cfg.clone();
+        let data_dir = self.data_dir.clone();
+        let sim = self.sim;
+        let (dns_res, fw4_res) = tokio::task::spawn_blocking(move || {
+            let dns_res = dns::sync_dnsmasq(&cfg_clone.dns, cfg_clone.enabled, sim);
+            let fw4_res = tproxy::sync_fw4(&cfg_clone, &data_dir, sim);
+            (dns_res, fw4_res)
+        })
+        .await
+        .context("singbox sync task panicked")?;
+
+        if let Err(e) = dns_res {
             tracing::warn!("singbox dnsmasq sync failed: {e:#}");
         }
 
-        if let Err(e) = tproxy::sync_fw4(&new_cfg, &self.data_dir, self.sim) {
+        if let Err(e) = fw4_res {
             tracing::warn!("singbox fw4 sync failed: {e:#}");
             *self.last_error.write().unwrap_or_else(|e| e.into_inner()) =
                 Some(format!("fw4 sync: {e:#}"));

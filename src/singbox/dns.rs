@@ -343,12 +343,11 @@ async fn forward_direct_dns(pkt: &[u8], upstream: SocketAddr, fwmark: u32) -> Re
     };
     let sock = tproxy::bind_udp_marked(bind_addr, fwmark)?;
     sock.send_to(pkt, upstream).await?;
-    let mut rbuf = vec![0u8; 4096];
+    let mut rbuf = [0u8; 4096];
     let (n, _) = tokio::time::timeout(DNS_UPSTREAM_TIMEOUT, sock.recv_from(&mut rbuf))
         .await
         .context("direct dns upstream timeout")??;
-    rbuf.truncate(n);
-    Ok(rbuf)
+    Ok(rbuf[..n].to_vec())
 }
 
 async fn forward_proxy_dns(
