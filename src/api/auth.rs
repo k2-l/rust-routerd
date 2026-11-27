@@ -57,7 +57,15 @@ pub async fn login(
         ));
     }
 
-    if req.username != "root" || !auth::verify_password("root", &req.password) {
+    let password_ok = if req.username == "root" {
+        let pw = req.password.clone();
+        tokio::task::spawn_blocking(move || auth::verify_password("root", &pw))
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+    } else {
+        false
+    };
+    if !password_ok {
         state.attempts.fail(&key);
         tokio::time::sleep(Duration::from_millis(350)).await;
         return Err(ApiError::Unauthorized);
@@ -170,7 +178,12 @@ pub async fn change_password(
     Extension(CurrentSession(session)): Extension<CurrentSession>,
     Json(req): Json<PasswordRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !auth::verify_password(&session.user, &req.current) {
+    let user = session.user.clone();
+    let current = req.current.clone();
+    let verified = tokio::task::spawn_blocking(move || auth::verify_password(&user, &current))
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if !verified {
         return Err(ApiError::bad("当前密码不正确"));
     }
     if req.new.len() < 8 {

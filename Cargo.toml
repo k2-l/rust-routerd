@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "http2", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio", "service"] }
 tower = { version = "0.5", features = ["util"] }

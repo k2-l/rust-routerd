@@ -19,7 +19,6 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Semaphore};
-use std::pin::Pin;
 use openssl::ssl::{Ssl, SslAcceptor};
 use tokio_openssl::SslStream;
 use tracing_subscriber::EnvFilter;

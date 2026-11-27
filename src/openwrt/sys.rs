@@ -658,6 +658,7 @@ pub struct Sample {
     pub mem_total: u64,
     pub rx: f64,
     pub tx: f64,
+    pub uptime_secs: u64,
 }
 
 pub struct History {
@@ -690,6 +691,7 @@ impl History {
             mem_total: 0,
             rx: 0.0,
             tx: 0.0,
+            uptime_secs: 0,
         })
     }
 
@@ -743,6 +745,7 @@ impl History {
             mem_total: mem_info.total,
             rx: rx.round(),
             tx: tx.round(),
+            uptime_secs: uptime_secs(),
         };
         self.push(sample);
         sample
@@ -750,6 +753,9 @@ impl History {
 }
 
 pub fn reboot() -> std::io::Result<()> {
+    if super::ubus::call("system", "reboot", None).is_ok() {
+        return Ok(());
+    }
     std::process::Command::new("/sbin/reboot").spawn().map(|_| ())
 }
 

@@ -225,7 +225,15 @@ pub async fn set_hostname(
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         uci::set_opt("system", "@system[0]", "hostname", &name_owned)?;
         uci::commit("system")?;
-        let _ = util::run("hostname", &[&name_owned]);
+        let rc = unsafe {
+            libc::sethostname(
+                name_owned.as_ptr() as *const libc::c_char,
+                name_owned.len() as _,
+            )
+        };
+        if rc != 0 {
+            return Err(anyhow::Error::new(std::io::Error::last_os_error()).context("sethostname"));
+        }
         Ok(())
     })
     .await
@@ -282,7 +290,7 @@ pub async fn events(
             let acc = st.access.read().unwrap_or_else(|e| e.into_inner());
             acc.summary()["pending"].as_u64().unwrap_or(0)
         };
-        let uptime = sys::human_duration(sys::uptime_secs());
+        let uptime = sys::human_duration(sample.uptime_secs);
         let sb = st.singbox.status();
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(prev_at).as_secs_f64();

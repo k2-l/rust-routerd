@@ -155,7 +155,7 @@ pub fn parse_reply_packet(
 
 fn set_system_clock(unix_secs: u64, subsec_nanos: u32) -> Result<()> {
     let ts = libc::timespec {
-        tv_sec: unix_secs as libc::time_t,
+        tv_sec: unix_secs as _,
         tv_nsec: subsec_nanos as libc::c_long,
     };
     let rc = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
