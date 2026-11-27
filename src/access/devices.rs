@@ -176,13 +176,14 @@ impl DeviceStore {
             let hostname = lease["hostname"].as_str().unwrap_or("").to_string();
             seen.insert(mac, (ip, hostname));
         }
+        let lan_wan = net::lan_wan_devs();
         let mut non_lan_macs: Vec<String> = Vec::new();
         for arp in net::arp_table() {
             let Some(mac) = arp["mac"].as_str().and_then(normalize_mac) else {
                 continue;
             };
             let dev = arp["device"].as_str().unwrap_or("");
-            if !net::is_lan_arp_device(dev) {
+            if !net::is_lan_arp_device_with(dev, &lan_wan) {
                 if !seen.contains_key(&mac) {
                     non_lan_macs.push(mac);
                 }

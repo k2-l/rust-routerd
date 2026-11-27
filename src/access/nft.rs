@@ -227,13 +227,14 @@ fn flush_unauthorized_conntrack(store: &DeviceStore) {
         blocked
     };
 
+    let lan_wan = crate::openwrt::net::lan_wan_devs();
     let mut target_ips: HashSet<std::net::Ipv4Addr> = HashSet::new();
     for a in crate::openwrt::net::arp_table() {
         let mac = a["mac"].as_str().unwrap_or("").to_ascii_lowercase();
         let ip = a["ip"].as_str().unwrap_or("");
         let dev = a["device"].as_str().unwrap_or("");
         if !mac.is_empty()
-            && crate::openwrt::net::is_lan_arp_device(dev)
+            && crate::openwrt::net::is_lan_arp_device_with(dev, &lan_wan)
             && should_flush(&mac, &mac_set)
         {
             if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {

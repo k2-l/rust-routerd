@@ -1,4 +1,3 @@
-use std::fs;
 use serde_json::{json, Value};
 
 use crate::openwrt::ubus;
@@ -35,20 +34,6 @@ fn rate_to_json(r: &crate::openwrt::nl80211::RateInfo) -> Value {
         "vht": r.vht,
         "he": r.he,
     })
-}
-
-/// Check if ARP entry is genuinely reachable (flags != 0x0) via /proc/net/arp
-fn is_arp_reachable(ip: &str) -> bool {
-    let Ok(content) = fs::read_to_string("/proc/net/arp") else {
-        return true;
-    };
-    for line in content.lines().skip(1) {
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() >= 3 && cols[0] == ip {
-            return cols[2] != "0x0";
-        }
-    }
-    false
 }
 
 pub fn live() -> Vec<Value> {
@@ -242,6 +227,7 @@ pub fn clients() -> Vec<Value> {
         }
     }
 
+    let lan_wan = crate::openwrt::net::lan_wan_devs();
     for a in &arp {
         let mac = a["mac"].as_str().unwrap_or("").to_ascii_uppercase();
         let ip = a["ip"].as_str().unwrap_or("");
@@ -252,11 +238,7 @@ pub fn clients() -> Vec<Value> {
             continue;
         }
         let dev = a["device"].as_str().unwrap_or("");
-        if !crate::openwrt::net::is_lan_arp_device(dev) {
-            continue;
-        }
-        // Filter out stale/unplugged ARP entries (flags == 0x0)
-        if !is_arp_reachable(ip) {
+        if !crate::openwrt::net::is_lan_arp_device_with(dev, &lan_wan) {
             continue;
         }
         let lease = leases

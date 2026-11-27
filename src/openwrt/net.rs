@@ -168,27 +168,40 @@ pub fn arp_table() -> Vec<Value> {
     out
 }
 
-/// Return true if `dev` is the router's LAN bridge/interface (excluding WAN such as `eth1` / `wan`).
-pub fn is_lan_arp_device(dev: &str) -> bool {
-    if dev.is_empty() {
-        return false;
-    }
+/// Read `(lan_dev, wan_dev)` from `/etc/config/network` once for batch ARP filtering.
+pub fn lan_wan_devs() -> (String, String) {
     let cfg = crate::openwrt::uci::load("network").unwrap_or_default();
     let lan_dev = cfg
         .section("lan")
         .and_then(|s| s.get("device"))
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("br-lan");
+        .unwrap_or("br-lan")
+        .to_string();
     let wan_dev = cfg
         .section("wan")
         .and_then(|s| s.get("device"))
         .map(str::trim)
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
+    (lan_dev, wan_dev)
+}
+
+/// Return true if `dev` is the router's LAN bridge/interface using preloaded `(lan_dev, wan_dev)`.
+pub fn is_lan_arp_device_with(dev: &str, devs: &(String, String)) -> bool {
+    if dev.is_empty() {
+        return false;
+    }
+    let (lan_dev, wan_dev) = devs;
     if !wan_dev.is_empty() && dev == wan_dev {
         return false;
     }
     dev == lan_dev || dev.starts_with("br-") || dev == "lan"
+}
+
+/// Return true if `dev` is the router's LAN bridge/interface (excluding WAN such as `eth1` / `wan`).
+pub fn is_lan_arp_device(dev: &str) -> bool {
+    is_lan_arp_device_with(dev, &lan_wan_devs())
 }
 
 pub fn leases() -> Vec<Value> {
@@ -278,9 +291,17 @@ pub struct PhysicalPort {
 }
 
 pub fn get_physical_ports() -> Vec<PhysicalPort> {
-    let wan_dev = read_uci_option("network", "wan", "device")
-        .or_else(|| read_uci_option("network", "wan", "ifname"))
-        .unwrap_or_else(|| "eth1".into());
+    let cfg = crate::openwrt::uci::load("network").unwrap_or_default();
+    let wan_dev = cfg
+        .section("wan")
+        .and_then(|s| {
+            s.get("device")
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .or_else(|| s.get("ifname").map(str::trim).filter(|v| !v.is_empty()))
+        })
+        .unwrap_or("eth1")
+        .to_string();
 
     let candidates = ["eth1", "eth0", "wan", "lan1", "lan2", "lan3", "lan4"];
     let mut ports = Vec::new();
@@ -365,16 +386,4 @@ pub fn redial_wan() -> anyhow::Result<()> {
     ubus::call("network.interface.wan", "up", None)
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("ubus up 调用失败: {e:#}"))
-}
-
-fn read_uci_option(pkg: &str, section: &str, opt: &str) -> Option<String> {
-    let out = Command::new("uci")
-        .args(["-q", "get", &format!("{}.{}.{}", pkg, section, opt)])
-        .output()
-        .ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    }
 }
